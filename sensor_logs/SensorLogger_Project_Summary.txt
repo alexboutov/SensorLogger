@@ -1,6 +1,14 @@
 SensorLogger Project Summary – Context & Decisions Log
 ======================================================
 
+PROJECT SNAPSHOT
+minSdk=26 targetSdk=34 jdk=17
+binding=viewBinding
+dataBinding=false
+compose=false
+material=true
+activityKtx=true
+
 Date Started: 2025-09-03
 User: alexb
 Device Targeted: Samsung SM-G930V (Android 8.0, API 26)
@@ -24,6 +32,8 @@ Java / JDK:
 - Initial Gradle download failed due to malformed URL (networkTimeout=10000).
 - Issue resolved by fixing wrapper settings or Gradle config.
 - Gradle wrapper downloaded and build ran successfully.
+- org.gradle.java.home is set in gradle.properties:
+  org.gradle.java.home=C\:\\Program Files\\Java\\jdk-17
 
 ------------------------------------------------------
 📱 App & SDK Configuration
@@ -53,6 +63,7 @@ android {
 - Android Studio warned: package="..." is deprecated with namespace in Gradle.
 - Removed package="com.example.sensorlogger" from manifest.
 - A later snippet reintroduced it; confirmed unnecessary and removed again.
+- Added: <uses-permission android:name="android.permission.WAKE_LOCK" />
 
 ------------------------------------------------------
 🚧 Build & Run Progress
@@ -62,6 +73,7 @@ android {
     * taskkill /F /IM java.exe /T
     * Deleting transforms-4 cache
 - Build succeeded after cleanup.
+- Fixed JBR vs JDK mismatch by forcing Gradle to use JDK 17 via org.gradle.java.home.
 
 ------------------------------------------------------
 📱 Physical Device Testing
@@ -71,6 +83,7 @@ android {
 - On tapping START, app crashed with:
   java.lang.SecurityException: Neither user 10206 nor current process has android.permission.WAKE_LOCK.
 - Cause: WAKE_LOCK permission missing from AndroidManifest.xml.
+- After adding permission, app runs, logs data, generates CSV files.
 
 ------------------------------------------------------
 🔑 Key Decisions & Preferences
