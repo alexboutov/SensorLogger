@@ -16,17 +16,9 @@ SESSION REQUESTS
 
 CHANGES SINCE LAST SUMMARY
 
-org.gradle.java.home set with proper escaping:
-org.gradle.java.home=C:\Program Files\Java\jdk-17
-
-Explicit dependency added to fix ComponentActivity resolution:
-implementation 'androidx.activity:activity-ktx:1.8.2'
-
-Azimuth input field added to activity_main.xml (TextInputLayout + TextInputEditText).
-
-MainActivity saves and restores azimuth using SharedPreferences; passes azimuth to SensorLoggerService.
-
-Fixed "Unresolved reference NotificationCompat" by using AndroidX imports and ensuring core dependencies; removed stray Gradle line from .kt file.
+UI updated: replaced two separate START/STOP buttons with a single toggle button (startStopButton).
+MainActivity.kt updated accordingly (single click listener, isLogging flag, dynamic label).
+Key decision added: before generating drop-in update for any file, current version must be pasted.
 
 OPEN ISSUES
 
@@ -34,52 +26,35 @@ None currently. App builds, installs, runs, and generates CSV files on the devic
 
 DONE TODAY
 
-Verified Gradle is using JDK 17 (Gradle 8.6, JVM 17.0.12).
-
-Corrected org.gradle.java.home path escaping in gradle.properties.
-
-Resolved NotificationCompat imports and ensured dependencies.
-
-Confirmed runtime logs in Logcat are benign (adb force-stop/start noise, AppCompatDelegate debug).
-
-Restructured summary file to compact template and plain ASCII.
+Switched to single START/STOP toggle in UI and code.
+Verified azimuth persistence and normalization logic remains unchanged.
+Updated summary with new process guardrail.
 
 ENVIRONMENT SETUP
 
 Initially, JAVA_HOME was not set; builds failed.
-
 Installed Oracle JDK 17 on Windows and set JAVA_HOME:
 C:\Program Files\Java\jdk-17
-
 PATH updated to include %JAVA_HOME%\bin.
-
 Android Studio JBR present at:
 C:\Program Files\Android\Android Studio\jbr
-(Gradle is forced to use the real JDK via org.gradle.java.home.)
-
-Removed reliance on "C:\Program Files\Common Files\Oracle\Java\javapath" for builds.
+(Gradle forced to use real JDK via org.gradle.java.home.)
+Removed reliance on "C:\Program Files\Common Files\Oracle\Java\javapath".
 
 GRADLE AND BUILD TOOLS
 
 Gradle wrapper: 8.6
-
 Kotlin: 1.9.20 (from Gradle -v)
-
 Fixed malformed distribution URL in gradle-wrapper.properties earlier.
-
 Forced Gradle JDK:
 org.gradle.java.home=C:\Program Files\Java\jdk-17
-
 settings.gradle uses google() and mavenCentral().
 
 APP AND SDK CONFIGURATION
 
 compileSdk 34
-
 defaultConfig: minSdk 26, targetSdk 34
-
 Java/Kotlin levels: Java 17, jvmTarget 17
-
 Dependencies (core set):
 implementation 'androidx.core:core-ktx:1.12.0'
 implementation 'androidx.core:core:1.12.0'
@@ -88,40 +63,31 @@ implementation 'com.google.android.material:material:1.9.0'
 implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
 implementation 'androidx.activity:activity-ktx:1.8.2'
 implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1'
-
 ViewBinding: ON
-
 Data Binding: OFF
-
 No Room, Retrofit, or Compose.
 
 ANDROIDMANIFEST
 
-Removed package="com.example.sensorlogger" (namespace is set in Gradle).
-
+Removed package="com.example.sensorlogger" (namespace set in Gradle).
 Added:
 <uses-permission android:name="android.permission.WAKE_LOCK" />
 
 BUILD AND RUN PROGRESS
 
 Resolved Gradle transform cache issues by killing java.exe and deleting .gradle\caches\transforms-4.
-
 Resolved jlink/JBR issue by forcing Gradle to use JDK 17.
-
 Builds succeed; app deploys and runs on device.
 
 PHYSICAL DEVICE TESTING
 
 Device: Samsung SM-G930V (Android 8.0, API 26)
-
-App runs; START/STOP works; CSV files generated and copied from device.
+App runs; START/STOP toggle works; CSV files generated and copied from device.
 
 KEY DECISIONS AND PREFERENCES
 
 Keep project minimal and focused.
-
 Only essential libraries; avoid optional tech unless explicitly requested.
-
-Assistant must stay aligned with this summary and new requests.
+Before generating drop-in update for any file, the current version of that file must first be pasted/provided in the chat to prevent unintended changes and ensure consistency.
 
 END OF FILE

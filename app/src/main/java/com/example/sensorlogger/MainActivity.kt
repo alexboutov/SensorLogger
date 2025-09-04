@@ -15,6 +15,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private val prefs by lazy { getSharedPreferences(PREFS_NAME, MODE_PRIVATE) }
 
+    // Local UI state for the toggle button
+    private var isLogging = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -24,6 +27,9 @@ class MainActivity : AppCompatActivity() {
         val last = prefs.getString(PREF_AZIMUTH, "0.0") ?: "0.0"
         binding.azimuthEditText.setText(last)
 
+        // Initial label for the single button
+        updateStartStopLabel()
+
         // 2) Save when user taps "Done" on the keyboard
         binding.azimuthEditText.setOnEditorActionListener { _, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_DONE) {
@@ -32,37 +38,47 @@ class MainActivity : AppCompatActivity() {
             } else false
         }
 
-        // 3) START: save + normalize and pass to service
-        binding.startButton.setOnClickListener {
-            saveAzimuth()
-            val azText = binding.azimuthEditText.text?.toString()?.trim().orEmpty()
-            val azimuthDeg = azText.toDoubleOrNull()?.let { v ->
-                // normalize into [0, 360)
-                val mod = ((v % 360.0) + 360.0) % 360.0
-                mod
-            } ?: 0.0
+        // 3) Single START/STOP toggle
+        binding.startStopButton.setOnClickListener {
+            if (!isLogging) {
+                // START: save + normalize + pass to service
+                saveAzimuth()
+                val azText = binding.azimuthEditText.text?.toString()?.trim().orEmpty()
+                val azimuthDeg = azText.toDoubleOrNull()?.let { v ->
+                    // normalize into [0, 360)
+                    val mod = ((v % 360.0) + 360.0) % 360.0
+                    mod
+                } ?: 0.0
 
-            val intent = Intent(this, SensorLoggerService::class.java).apply {
-                putExtra(EXTRA_AZIMUTH_DEG, azimuthDeg)
+                val intent = Intent(this, SensorLoggerService::class.java).apply {
+                    putExtra(EXTRA_AZIMUTH_DEG, azimuthDeg)
+                }
+                // Use the same start call you already use
+                startService(intent)
+
+                isLogging = true
+                updateStartStopLabel()
+            } else {
+                // STOP
+                stopService(Intent(this, SensorLoggerService::class.java))
+                isLogging = false
+                updateStartStopLabel()
             }
-            // Use the same start call you already use (foreground or not)
-            startService(intent)
-        }
-
-        // 4) STOP remains as you have it
-        binding.stopButton.setOnClickListener {
-            stopService(Intent(this, SensorLoggerService::class.java))
         }
     }
 
     override fun onPause() {
         super.onPause()
-        // 5) Save on lifecycle exit as well
+        // 4) Save on lifecycle exit as well
         saveAzimuth()
     }
 
     private fun saveAzimuth() {
         val azText = binding.azimuthEditText.text?.toString()?.trim().orEmpty()
         prefs.edit().putString(PREF_AZIMUTH, azText).apply()
+    }
+
+    private fun updateStartStopLabel() {
+        binding.startStopButton.text = if (isLogging) "STOP" else "START"
     }
 }
