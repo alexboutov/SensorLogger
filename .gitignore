@@ -1,0 +1,49 @@
+# ---- Gradle ----
+.gradle/
+build/
+**/build/
+!gradle/wrapper/gradle-wrapper.jar
+
+# ---- Android Studio / IntelliJ ----
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# ---- User-specific files ----
+local.properties
+keystore.properties
+.DS_Store
+
+# ---- Generated files ----
+captures/
+.externalNativeBuild/
+.cxx/
+outputs/
+*.apk
+*.ap_
+*.dex
+*.class
+
+# ---- OS files ----
+Thumbs.db
+ehthumbs.db
+
+# ---- Logs ----
+*.log
+
+# ---- Keystore files (do NOT check in signing keys) ----
+*.jks
+*.keystore
+
+# ---- Android profiling ----
+*.hprof
+
+# ---- Misc ----
+/app/release/
+
+# ---- Prevent nested .gitignore from reappearing (optional) ----
+app/.gitignore
+.idea/.gitignore
+/logs/adb_pull.bat
+/logs/*.csv

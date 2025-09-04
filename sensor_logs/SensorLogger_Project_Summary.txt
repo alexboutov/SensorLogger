@@ -1,0 +1,99 @@
+
+SensorLogger Project Summary – Context & Decisions Log
+======================================================
+
+Date Started: 2025-09-03
+User: alexb
+Device Targeted: Samsung SM-G930V (Android 8.0, API 26)
+
+------------------------------------------------------
+🛠️ Environment Setup
+------------------------------------------------------
+Java / JDK:
+- Initially, JAVA_HOME was not set — build failed.
+- jdk-17 folder not found in C:\Program Files\Java.
+- Android Studio bundled JBR detected at C:\Program Files\Android\Android Studio\jbr.
+- Oracle JDK 17 was chosen and downloaded for Windows.
+- JAVA_HOME set to: C:\Program Files\Java\jdk-17\
+- PATH updated to include %JAVA_HOME%\bin.
+- C:\Program Files\Common Files\Oracle\Java\javapath was present in PATH; confirmed not needed.
+
+------------------------------------------------------
+⚙️ Gradle & Build Tools
+------------------------------------------------------
+- Gradle version 8.6 is used via the Gradle wrapper.
+- Initial Gradle download failed due to malformed URL (networkTimeout=10000).
+- Issue resolved by fixing wrapper settings or Gradle config.
+- Gradle wrapper downloaded and build ran successfully.
+
+------------------------------------------------------
+📱 App & SDK Configuration
+------------------------------------------------------
+build.gradle (app):
+android {
+    compileSdk 34
+    defaultConfig {
+        minSdk 26         // Targeting Android 8 (Oreo)
+        targetSdk 34
+    }
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+}
+- No additional libraries like Room, Retrofit, or Jetpack Compose.
+- View Binding enabled, Data Binding not used.
+- App is kept minimal, focused, and distraction-free.
+
+------------------------------------------------------
+📄 AndroidManifest.xml
+------------------------------------------------------
+- Android Studio warned: package="..." is deprecated with namespace in Gradle.
+- Removed package="com.example.sensorlogger" from manifest.
+- A later snippet reintroduced it; confirmed unnecessary and removed again.
+
+------------------------------------------------------
+🧪 Build & Run Progress
+------------------------------------------------------
+- gradlew clean build executed and succeeded.
+- Some .gradle cache lock issues resolved by:
+    * taskkill /F /IM java.exe /T
+    * Deleting transforms-4 cache
+- Build succeeded after cleanup.
+
+------------------------------------------------------
+📱 Physical Device Testing
+------------------------------------------------------
+- Device: Samsung SM-G930V (API 26)
+- App installed and launched via Android Studio
+- On tapping START, app crashed with:
+  java.lang.SecurityException: Neither user 10206 nor current process has android.permission.WAKE_LOCK.
+- Cause: WAKE_LOCK permission missing from AndroidManifest.xml.
+
+------------------------------------------------------
+📌 Key Decisions & Preferences
+------------------------------------------------------
+- Focus only on essential tools/libraries.
+- Avoid all optional suggestions like Room, Retrofit, Compose.
+- All help must be directly task-related.
+- Assistant should stay fully aligned with existing setup.
+- User will maintain a log to ensure project continuity.
+- This .txt log will be added to GitHub for full tracking.
+
+------------------------------------------------------
+✅ Permissions Added
+------------------------------------------------------
+To fix crash:
+<uses-permission android:name="android.permission.WAKE_LOCK" />
+was added to AndroidManifest.xml.
+
+------------------------------------------------------
+📂 Project Structure (so far)
+------------------------------------------------------
+- MainActivity.kt exists.
+- A SensorLoggerService is used.
+- No Room, Retrofit, or 3rd-party libraries.
+- Likely working with Android sensors.
