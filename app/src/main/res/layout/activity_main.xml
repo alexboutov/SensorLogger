@@ -5,6 +5,23 @@
     android:gravity="center"
     android:orientation="vertical"
     android:padding="24dp">
+    <!-- Azimuth input (degrees 0–360) -->
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/azimuthInputLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Azimuth (degrees, 0–360)"
+        android:layout_marginTop="12dp">
+
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/azimuthEditText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="numberDecimal"
+            android:maxLines="1"
+            android:imeOptions="actionDone"
+            android:hint="e.g., 90.0" />
+    </com.google.android.material.textfield.TextInputLayout>
 
     <Button
         android:id="@+id/startButton"

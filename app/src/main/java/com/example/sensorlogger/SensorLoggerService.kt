@@ -7,6 +7,7 @@ import android.content.Intent
 import android.hardware.*
 import android.os.*
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileWriter

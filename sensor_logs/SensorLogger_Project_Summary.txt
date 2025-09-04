@@ -1,4 +1,3 @@
-
 SensorLogger Project Summary – Context & Decisions Log
 ======================================================
 
@@ -7,7 +6,7 @@ User: alexb
 Device Targeted: Samsung SM-G930V (Android 8.0, API 26)
 
 ------------------------------------------------------
-🛠️ Environment Setup
+📦 Environment Setup
 ------------------------------------------------------
 Java / JDK:
 - Initially, JAVA_HOME was not set — build failed.
@@ -19,7 +18,7 @@ Java / JDK:
 - C:\Program Files\Common Files\Oracle\Java\javapath was present in PATH; confirmed not needed.
 
 ------------------------------------------------------
-⚙️ Gradle & Build Tools
+🛠 Gradle & Build Tools
 ------------------------------------------------------
 - Gradle version 8.6 is used via the Gradle wrapper.
 - Initial Gradle download failed due to malformed URL (networkTimeout=10000).
@@ -56,7 +55,7 @@ android {
 - A later snippet reintroduced it; confirmed unnecessary and removed again.
 
 ------------------------------------------------------
-🧪 Build & Run Progress
+🚧 Build & Run Progress
 ------------------------------------------------------
 - gradlew clean build executed and succeeded.
 - Some .gradle cache lock issues resolved by:
@@ -74,7 +73,7 @@ android {
 - Cause: WAKE_LOCK permission missing from AndroidManifest.xml.
 
 ------------------------------------------------------
-📌 Key Decisions & Preferences
+🔑 Key Decisions & Preferences
 ------------------------------------------------------
 - Focus only on essential tools/libraries.
 - Avoid all optional suggestions like Room, Retrofit, Compose.
@@ -84,7 +83,7 @@ android {
 - This .txt log will be added to GitHub for full tracking.
 
 ------------------------------------------------------
-✅ Permissions Added
+🛡 Permissions Added
 ------------------------------------------------------
 To fix crash:
 <uses-permission android:name="android.permission.WAKE_LOCK" />
@@ -97,3 +96,20 @@ was added to AndroidManifest.xml.
 - A SensorLoggerService is used.
 - No Room, Retrofit, or 3rd-party libraries.
 - Likely working with Android sensors.
+
+------------------------------------------------------
+✨ New Features & Fixes
+------------------------------------------------------
+- Added explicit dependency:
+  implementation 'androidx.activity:activity-ktx:1.8.2'
+  → Fixes "Cannot access 'ComponentActivity'" error.
+- Added TextInputEditText in activity_main.xml for user to enter Azimuth (degrees).
+- MainActivity.kt updated:
+  → Reads, validates, and persists azimuth.
+  → Passes azimuth as EXTRA to SensorLoggerService.
+- SensorLoggerService.kt updated:
+  → Reads azimuth from Intent and stores it for later use.
+- NotificationCompat setup:
+  → Fixed "Unresolved reference NotificationCompat" by removing stray Gradle dependency line from .kt file.
+  → Correct imports added (androidx.core.app.NotificationCompat, NotificationManagerCompat).
+- App successfully builds, runs, logs sensor data, and generates CSV files.
