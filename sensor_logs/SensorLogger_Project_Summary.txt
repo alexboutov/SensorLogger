@@ -1,128 +1,127 @@
-SensorLogger Project Summary – Context & Decisions Log
-======================================================
+SensorLogger Project Summary - Context & Decisions Log
 
 PROJECT SNAPSHOT
-minSdk=26 targetSdk=34 jdk=17
+minSdk=26
+targetSdk=34
+jdk=17
 binding=viewBinding
 dataBinding=false
 compose=false
 material=true
 activityKtx=true
 
-Date Started: 2025-09-03
-User: alexb
-Device Targeted: Samsung SM-G930V (Android 8.0, API 26)
+SESSION REQUESTS
 
-------------------------------------------------------
-📦 Environment Setup
-------------------------------------------------------
-Java / JDK:
-- Initially, JAVA_HOME was not set — build failed.
-- jdk-17 folder not found in C:\Program Files\Java.
-- Android Studio bundled JBR detected at C:\Program Files\Android\Android Studio\jbr.
-- Oracle JDK 17 was chosen and downloaded for Windows.
-- JAVA_HOME set to: C:\Program Files\Java\jdk-17\
-- PATH updated to include %JAVA_HOME%\bin.
-- C:\Program Files\Common Files\Oracle\Java\javapath was present in PATH; confirmed not needed.
+(fill in at start of next session)
 
-------------------------------------------------------
-🛠 Gradle & Build Tools
-------------------------------------------------------
-- Gradle version 8.6 is used via the Gradle wrapper.
-- Initial Gradle download failed due to malformed URL (networkTimeout=10000).
-- Issue resolved by fixing wrapper settings or Gradle config.
-- Gradle wrapper downloaded and build ran successfully.
-- org.gradle.java.home is set in gradle.properties:
-  org.gradle.java.home=C\:\\Program Files\\Java\\jdk-17
+CHANGES SINCE LAST SUMMARY
 
-------------------------------------------------------
-📱 App & SDK Configuration
-------------------------------------------------------
-build.gradle (app):
-android {
-    compileSdk 34
-    defaultConfig {
-        minSdk 26         // Targeting Android 8 (Oreo)
-        targetSdk 34
-    }
-    compileOptions {
-        sourceCompatibility JavaVersion.VERSION_17
-        targetCompatibility JavaVersion.VERSION_17
-    }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
-}
-- No additional libraries like Room, Retrofit, or Jetpack Compose.
-- View Binding enabled, Data Binding not used.
-- App is kept minimal, focused, and distraction-free.
+org.gradle.java.home set with proper escaping:
+org.gradle.java.home=C:\Program Files\Java\jdk-17
 
-------------------------------------------------------
-📄 AndroidManifest.xml
-------------------------------------------------------
-- Android Studio warned: package="..." is deprecated with namespace in Gradle.
-- Removed package="com.example.sensorlogger" from manifest.
-- A later snippet reintroduced it; confirmed unnecessary and removed again.
-- Added: <uses-permission android:name="android.permission.WAKE_LOCK" />
+Explicit dependency added to fix ComponentActivity resolution:
+implementation 'androidx.activity:activity-ktx:1.8.2'
 
-------------------------------------------------------
-🚧 Build & Run Progress
-------------------------------------------------------
-- gradlew clean build executed and succeeded.
-- Some .gradle cache lock issues resolved by:
-    * taskkill /F /IM java.exe /T
-    * Deleting transforms-4 cache
-- Build succeeded after cleanup.
-- Fixed JBR vs JDK mismatch by forcing Gradle to use JDK 17 via org.gradle.java.home.
+Azimuth input field added to activity_main.xml (TextInputLayout + TextInputEditText).
 
-------------------------------------------------------
-📱 Physical Device Testing
-------------------------------------------------------
-- Device: Samsung SM-G930V (API 26)
-- App installed and launched via Android Studio
-- On tapping START, app crashed with:
-  java.lang.SecurityException: Neither user 10206 nor current process has android.permission.WAKE_LOCK.
-- Cause: WAKE_LOCK permission missing from AndroidManifest.xml.
-- After adding permission, app runs, logs data, generates CSV files.
+MainActivity saves and restores azimuth using SharedPreferences; passes azimuth to SensorLoggerService.
 
-------------------------------------------------------
-🔑 Key Decisions & Preferences
-------------------------------------------------------
-- Focus only on essential tools/libraries.
-- Avoid all optional suggestions like Room, Retrofit, Compose.
-- All help must be directly task-related.
-- Assistant should stay fully aligned with existing setup.
-- User will maintain a log to ensure project continuity.
-- This .txt log will be added to GitHub for full tracking.
+Fixed "Unresolved reference NotificationCompat" by using AndroidX imports and ensuring core dependencies; removed stray Gradle line from .kt file.
 
-------------------------------------------------------
-🛡 Permissions Added
-------------------------------------------------------
-To fix crash:
+OPEN ISSUES
+
+None currently. App builds, installs, runs, and generates CSV files on the device.
+
+DONE TODAY
+
+Verified Gradle is using JDK 17 (Gradle 8.6, JVM 17.0.12).
+
+Corrected org.gradle.java.home path escaping in gradle.properties.
+
+Resolved NotificationCompat imports and ensured dependencies.
+
+Confirmed runtime logs in Logcat are benign (adb force-stop/start noise, AppCompatDelegate debug).
+
+Restructured summary file to compact template and plain ASCII.
+
+ENVIRONMENT SETUP
+
+Initially, JAVA_HOME was not set; builds failed.
+
+Installed Oracle JDK 17 on Windows and set JAVA_HOME:
+C:\Program Files\Java\jdk-17
+
+PATH updated to include %JAVA_HOME%\bin.
+
+Android Studio JBR present at:
+C:\Program Files\Android\Android Studio\jbr
+(Gradle is forced to use the real JDK via org.gradle.java.home.)
+
+Removed reliance on "C:\Program Files\Common Files\Oracle\Java\javapath" for builds.
+
+GRADLE AND BUILD TOOLS
+
+Gradle wrapper: 8.6
+
+Kotlin: 1.9.20 (from Gradle -v)
+
+Fixed malformed distribution URL in gradle-wrapper.properties earlier.
+
+Forced Gradle JDK:
+org.gradle.java.home=C:\Program Files\Java\jdk-17
+
+settings.gradle uses google() and mavenCentral().
+
+APP AND SDK CONFIGURATION
+
+compileSdk 34
+
+defaultConfig: minSdk 26, targetSdk 34
+
+Java/Kotlin levels: Java 17, jvmTarget 17
+
+Dependencies (core set):
+implementation 'androidx.core:core-ktx:1.12.0'
+implementation 'androidx.core:core:1.12.0'
+implementation 'androidx.appcompat:appcompat:1.6.1'
+implementation 'com.google.android.material:material:1.9.0'
+implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+implementation 'androidx.activity:activity-ktx:1.8.2'
+implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1'
+
+ViewBinding: ON
+
+Data Binding: OFF
+
+No Room, Retrofit, or Compose.
+
+ANDROIDMANIFEST
+
+Removed package="com.example.sensorlogger" (namespace is set in Gradle).
+
+Added:
 <uses-permission android:name="android.permission.WAKE_LOCK" />
-was added to AndroidManifest.xml.
 
-------------------------------------------------------
-📂 Project Structure (so far)
-------------------------------------------------------
-- MainActivity.kt exists.
-- A SensorLoggerService is used.
-- No Room, Retrofit, or 3rd-party libraries.
-- Likely working with Android sensors.
+BUILD AND RUN PROGRESS
 
-------------------------------------------------------
-✨ New Features & Fixes
-------------------------------------------------------
-- Added explicit dependency:
-  implementation 'androidx.activity:activity-ktx:1.8.2'
-  → Fixes "Cannot access 'ComponentActivity'" error.
-- Added TextInputEditText in activity_main.xml for user to enter Azimuth (degrees).
-- MainActivity.kt updated:
-  → Reads, validates, and persists azimuth.
-  → Passes azimuth as EXTRA to SensorLoggerService.
-- SensorLoggerService.kt updated:
-  → Reads azimuth from Intent and stores it for later use.
-- NotificationCompat setup:
-  → Fixed "Unresolved reference NotificationCompat" by removing stray Gradle dependency line from .kt file.
-  → Correct imports added (androidx.core.app.NotificationCompat, NotificationManagerCompat).
-- App successfully builds, runs, logs sensor data, and generates CSV files.
+Resolved Gradle transform cache issues by killing java.exe and deleting .gradle\caches\transforms-4.
+
+Resolved jlink/JBR issue by forcing Gradle to use JDK 17.
+
+Builds succeed; app deploys and runs on device.
+
+PHYSICAL DEVICE TESTING
+
+Device: Samsung SM-G930V (Android 8.0, API 26)
+
+App runs; START/STOP works; CSV files generated and copied from device.
+
+KEY DECISIONS AND PREFERENCES
+
+Keep project minimal and focused.
+
+Only essential libraries; avoid optional tech unless explicitly requested.
+
+Assistant must stay aligned with this summary and new requests.
+
+END OF FILE
