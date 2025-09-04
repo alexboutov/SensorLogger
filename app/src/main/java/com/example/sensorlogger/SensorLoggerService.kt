@@ -6,7 +6,6 @@ import android.content.Intent
 import android.hardware.*
 import android.os.*
 import androidx.core.app.NotificationCompat
-//import androidx.core.app.NotificationManagerCompat
 import kotlinx.coroutines.*
 import java.io.File
 import java.io.FileWriter
@@ -24,18 +23,32 @@ class SensorLoggerService : Service(), SensorEventListener {
     private lateinit var sessionTimestamp: String
 
     private val fileWriters = mutableMapOf<Int, FileWriter>()
+    private var combinedWriter: FileWriter? = null
 
+    // Buffers for latest readings (sensor timestamp + 3 components)
+    private data class Snapshot(var ts: Long = 0L, val v: FloatArray = floatArrayOf(Float.NaN, Float.NaN, Float.NaN))
+
+    private val latestLA = Snapshot()
+    private val latestACC = Snapshot()
+    private val latestGRAV = Snapshot()
+    private val latestMAG = Snapshot()
+
+    // For rotation & P computation
     private val gravity = FloatArray(3)
     private val magnetic = FloatArray(3)
     private var hasGravity = false
     private var hasMagnetic = false
-
     private val rotationMatrix = FloatArray(9)
 
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private lateinit var wakeLock: PowerManager.WakeLock
 
+    // “POC” angle used to project horizontal acceleration into forward axis
     private val POC = 90f
+    private var latestP: Double = 0.0
+
+    // Simple lock for consistency across concurrent writes
+    private val lock = Any()
 
     override fun onCreate() {
         super.onCreate()
@@ -106,7 +119,8 @@ class SensorLoggerService : Service(), SensorEventListener {
 
     override fun onSensorChanged(event: SensorEvent) {
         val sensorType = event.sensor.type
-        val timestamp = System.currentTimeMillis()
+        val sysTimestamp = System.currentTimeMillis()
+        val sensorTimestamp = event.timestamp // ns since boot; we’ll store system time for CSVs, but keep this for future if needed
         val values = event.values.copyOf()
 
         when (sensorType) {
@@ -114,7 +128,6 @@ class SensorLoggerService : Service(), SensorEventListener {
                 System.arraycopy(values, 0, gravity, 0, 3)
                 hasGravity = true
             }
-
             Sensor.TYPE_MAGNETIC_FIELD -> {
                 System.arraycopy(values, 0, magnetic, 0, 3)
                 hasMagnetic = true
@@ -122,28 +135,83 @@ class SensorLoggerService : Service(), SensorEventListener {
         }
 
         scope.launch {
-            val writer = getWriter(sensorType)
-            val line = buildString {
-                append(timestamp)
-                values.forEach { append(",$it") }
+            // Update per-sensor latest snapshot and write per-sensor CSV
+            synchronized(lock) {
+                when (sensorType) {
+                    Sensor.TYPE_LINEAR_ACCELERATION -> {
+                        latestLA.ts = sysTimestamp
+                        System.arraycopy(values, 0, latestLA.v, 0, 3)
 
-                if (sensorType == Sensor.TYPE_LINEAR_ACCELERATION && hasGravity && hasMagnetic) {
-                    SensorManager.getRotationMatrix(rotationMatrix, null, gravity, magnetic)
-                    val accDevice = values
-                    val accWorldX = rotationMatrix[0] * accDevice[0] + rotationMatrix[1] * accDevice[1] + rotationMatrix[2] * accDevice[2]
-                    val accWorldY = rotationMatrix[3] * accDevice[0] + rotationMatrix[4] * accDevice[1] + rotationMatrix[5] * accDevice[2]
-                    val flatAcc = sqrt(accWorldX * accWorldX + accWorldY * accWorldY)
-                    val P = if (flatAcc != 0f) {
-                        accWorldX * sin(Math.toRadians(POC.toDouble())) + accWorldY * cos(Math.toRadians(POC.toDouble()))
-                    } else 0.0
-                    append(",${"%.5f".format(Locale.US, P)}")
+                        // Compute/refresh P if we have orientation
+                        if (hasGravity && hasMagnetic) {
+                            SensorManager.getRotationMatrix(rotationMatrix, null, gravity, magnetic)
+                            val accDevice = values
+                            val accWorldX = rotationMatrix[0] * accDevice[0] + rotationMatrix[1] * accDevice[1] + rotationMatrix[2] * accDevice[2]
+                            val accWorldY = rotationMatrix[3] * accDevice[0] + rotationMatrix[4] * accDevice[1] + rotationMatrix[5] * accDevice[2]
+                            val flatAcc = sqrt(accWorldX * accWorldX + accWorldY * accWorldY)
+                            latestP = if (flatAcc != 0f) {
+                                accWorldX * sin(Math.toRadians(POC.toDouble())) +
+                                        accWorldY * cos(Math.toRadians(POC.toDouble()))
+                            } else 0.0
+                        }
+                    }
+                    Sensor.TYPE_ACCELEROMETER -> {
+                        latestACC.ts = sysTimestamp
+                        System.arraycopy(values, 0, latestACC.v, 0, 3)
+                    }
+                    Sensor.TYPE_GRAVITY -> {
+                        latestGRAV.ts = sysTimestamp
+                        System.arraycopy(values, 0, latestGRAV.v, 0, 3)
+                    }
+                    Sensor.TYPE_MAGNETIC_FIELD -> {
+                        latestMAG.ts = sysTimestamp
+                        System.arraycopy(values, 0, latestMAG.v, 0, 3)
+                    }
                 }
 
-                append("\n")
-            }
+                // Write the per-sensor CSV row (keeps your existing per-type files)
+                val singleWriter = getWriter(sensorType)
+                val singleLine = buildString {
+                    append(sysTimestamp)
+                    values.forEach { append(","); append(it) }
+                    if (sensorType == Sensor.TYPE_LINEAR_ACCELERATION) {
+                        append(",")
+                        append(String.format(Locale.US, "%.5f", latestP))
+                    }
+                    append("\n")
+                }
+                singleWriter.write(singleLine)
+                singleWriter.flush()
 
-            writer.write(line)
-            writer.flush()
+                // Write the combined CSV row (every sensor update triggers a snapshot line)
+                val cw = getCombinedWriter()
+                val line = buildString {
+                    append(sysTimestamp)
+
+                    fun addSnapshot(s: Snapshot) {
+                        // 4 fields per sensor: ts, x, y, z
+                        append(",")
+                        if (s.ts == 0L) append("") else append(s.ts)
+                        for (i in 0..2) {
+                            append(",")
+                            val v = s.v[i]
+                            if (v.isNaN()) append("") else append(String.format(Locale.US, "%.6f", v))
+                        }
+                    }
+
+                    addSnapshot(latestLA)
+                    addSnapshot(latestACC)
+                    addSnapshot(latestGRAV)
+                    addSnapshot(latestMAG)
+
+                    append(",")
+                    append(String.format(Locale.US, "%.5f", latestP))
+
+                    append("\n")
+                }
+                cw.write(line)
+                cw.flush()
+            }
         }
     }
 
@@ -153,36 +221,65 @@ class SensorLoggerService : Service(), SensorEventListener {
         return fileWriters.getOrPut(sensorType) {
             val typeSuffix = when (sensorType) {
                 Sensor.TYPE_LINEAR_ACCELERATION -> "la"
-                Sensor.TYPE_ACCELEROMETER -> "acc"
-                Sensor.TYPE_GRAVITY -> "grav"
-                Sensor.TYPE_MAGNETIC_FIELD -> "mag"
-                else -> "other"
+                Sensor.TYPE_ACCELEROMETER      -> "acc"
+                Sensor.TYPE_GRAVITY            -> "grav"
+                Sensor.TYPE_MAGNETIC_FIELD     -> "mag"
+                else                           -> "other"
             }
 
             val fileName = "run_${sessionTimestamp}_$typeSuffix.csv"
             val file = File(logDir, fileName)
 
             val writer = FileWriter(file, true)
-            val header = buildString {
-                append("timestamp")
-                for (i in 0 until 3) append(",val$i")
-                if (sensorType == Sensor.TYPE_LINEAR_ACCELERATION) append(",P")
-                append("\n")
+            if (file.length() == 0L) {
+                // Header: timestamp,val0,val1,val2,(+P for LA)
+                val header = buildString {
+                    append("timestamp")
+                    append(",val0,val1,val2")
+                    if (sensorType == Sensor.TYPE_LINEAR_ACCELERATION) append(",P")
+                    append("\n")
+                }
+                writer.write(header)
+                writer.flush()
             }
-
-            writer.write(header)
             writer
         }
     }
 
-    private fun closeWriters() {
-        fileWriters.values.forEach {
-            try {
-                it.flush()
-                it.close()
-            } catch (_: Exception) {
+    private fun getCombinedWriter(): FileWriter {
+        if (combinedWriter == null) {
+            val file = File(logDir, "run_${sessionTimestamp}_combined.csv")
+            combinedWriter = FileWriter(file, true)
+            if (file.length() == 0L) {
+                // Header (18 columns total):
+                // sysTs,
+                // laTs,laX,laY,laZ,
+                // accTs,accX,accY,accZ,
+                // gravTs,gravX,gravY,gravZ,
+                // magTs,magX,magY,magZ,
+                // P
+                val header = "sysTs," +
+                        "laTs,laX,laY,laZ," +
+                        "accTs,accX,accY,accZ," +
+                        "gravTs,gravX,gravY,gravZ," +
+                        "magTs,magX,magY,magZ," +
+                        "P\n"
+                combinedWriter!!.write(header)
+                combinedWriter!!.flush()
             }
         }
-        fileWriters.clear()
+        return combinedWriter!!
+    }
+
+    private fun closeWriters() {
+        try {
+            fileWriters.values.forEach {
+                try { it.flush(); it.close() } catch (_: Exception) {}
+            }
+            fileWriters.clear()
+        } finally {
+            try { combinedWriter?.flush(); combinedWriter?.close() } catch (_: Exception) {}
+            combinedWriter = null
+        }
     }
 }

@@ -22,13 +22,14 @@ Key decision added: before generating drop-in update for any file, current versi
 
 OPEN ISSUES
 
-None currently. App builds, installs, runs, and generates CSV files on the device.
+Add one more .csv file in which all the latest values from all four sensors are logged.  We keep latest readings, including timestamps from each sensor and when any of the sensors is updated we log into this new file 1) system timestamp 2) sixteen latest values, four from each sensor, 3) the latest P.
 
 DONE TODAY
 
 Switched to single START/STOP toggle in UI and code.
 Verified azimuth persistence and normalization logic remains unchanged.
 Updated summary with new process guardrail.
+Verified STOP behavior: pressing STOP halts SensorLoggerService and logging ceases (confirmed via logcat).
 
 ENVIRONMENT SETUP
 
@@ -47,7 +48,7 @@ Gradle wrapper: 8.6
 Kotlin: 1.9.20 (from Gradle -v)
 Fixed malformed distribution URL in gradle-wrapper.properties earlier.
 Forced Gradle JDK:
-org.gradle.java.home=C:\Program Files\Java\jdk-17
+org.gradle.java.home=C:\ Program Files\Java\jdk-17
 settings.gradle uses google() and mavenCentral().
 
 APP AND SDK CONFIGURATION
@@ -78,6 +79,8 @@ BUILD AND RUN PROGRESS
 Resolved Gradle transform cache issues by killing java.exe and deleting .gradle\caches\transforms-4.
 Resolved jlink/JBR issue by forcing Gradle to use JDK 17.
 Builds succeed; app deploys and runs on device.
+STOP behavior verified: pressing STOP in the UI stopped SensorLoggerService; no further rows appended to CSV files.
+Device connection issue (USB/Wi‑Fi): After attempting to connect a different phone, SM-G930V did not appear in the device list despite reconnecting USB, restarting the phone and Android Studio, confirming Developer Options were on, and using Connection Assistant actions (Rescan Devices, Restart ADB Server). Switching to a different laptop USB port immediately made SM-G930V appear. Workaround noted: try a different USB port if the device is missing.
 
 PHYSICAL DEVICE TESTING
 
@@ -89,5 +92,3 @@ KEY DECISIONS AND PREFERENCES
 Keep project minimal and focused.
 Only essential libraries; avoid optional tech unless explicitly requested.
 Before generating drop-in update for any file, the current version of that file must first be pasted/provided in the chat to prevent unintended changes and ensure consistency.
-
-END OF FILE
