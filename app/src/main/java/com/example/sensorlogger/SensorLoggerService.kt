@@ -1,17 +1,30 @@
 package com.example.sensorlogger
 
-import android.app.*
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.Service
 import android.content.Context
 import android.content.Intent
-import android.hardware.*
-import android.os.*
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
+import android.os.IBinder
+import android.os.PowerManager
 import androidx.core.app.NotificationCompat
-import kotlinx.coroutines.*
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.asCoroutineDispatcher
+import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileWriter
 import java.io.Writer
 import java.text.SimpleDateFormat
-import java.util.*
+import java.util.Locale
+import java.util.Date
 import java.util.concurrent.Executors
 import kotlin.math.cos
 import kotlin.math.sin
@@ -29,7 +42,6 @@ class SensorLoggerService : Service(), SensorEventListener {
 
     // Buffers for latest readings (sensor timestamp + 3 components)
     private data class Snapshot(var ts: Long = 0L, val v: FloatArray = floatArrayOf(Float.NaN, Float.NaN, Float.NaN))
-
     private val latestLA = Snapshot()
     private val latestACC = Snapshot()
     private val latestGRAV = Snapshot()
@@ -41,6 +53,13 @@ class SensorLoggerService : Service(), SensorEventListener {
     private var hasGravity = false
     private var hasMagnetic = false
     private val rotationMatrix = FloatArray(9)
+
+    // Projection direction from UI azimuth (deg clockwise from North).
+    // World frame from getRotationMatrix: X=East, Y=North, Z=Up.
+    private var azimuthDeg: Double = 0.0
+    private var dirFx: Double = 0.0   // East component = sin(az)
+    private var dirFy: Double = 1.0   // North component = cos(az)
+    private var latestP: Double = 0.0 // m/s^2 along heading
 
     /** ===== Concurrency & lifecycle guards ===== */
     private val ioErrorHandler = CoroutineExceptionHandler { _, e ->
@@ -56,15 +75,14 @@ class SensorLoggerService : Service(), SensorEventListener {
 
     private lateinit var wakeLock: PowerManager.WakeLock
 
-    // “POC” angle used to project horizontal acceleration into forward axis
-    private val POC = 90f
-    private var latestP: Double = 0.0
+    // LA timing
+    private var prevLaTsNs: Long = 0L           // last raw sensor ns
+    private var laClockSec: Double = 0.0        // accumulated SECONDS since START
 
-    // LA timing (sensor-clock, in nanoseconds)
-    private var prevLaTsNs: Long = 0L
-    private var laClockNs: Long = 0L
+    // ===== Velocity accumulator (per spec) =====
+    private var vAccum: Double = 0.0  // V[i]
 
-    // Simple lock for consistency across concurrent writes (still useful inside single-thread)
+    // Simple lock for consistency (used inside single-thread too for clarity)
     private val lock = Any()
 
     override fun onCreate() {
@@ -77,8 +95,21 @@ class SensorLoggerService : Service(), SensorEventListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // START: open run and reset accumulators
         isLogging = true
         writersOpen = true
+
+        // 1) Read azimuth from UI and precompute direction vector (X=East, Y=North)
+        azimuthDeg = intent?.getDoubleExtra(EXTRA_AZIMUTH_DEG, 0.0) ?: 0.0
+        val azRad = Math.toRadians(azimuthDeg)
+        dirFx = sin(azRad) // along East
+        dirFy = cos(azRad) // along North
+
+        // 2) Reset integrators/clocks for a clean session
+        vAccum = 0.0
+        prevLaTsNs = 0L
+        laClockSec = 0.0
+
         registerSensors()
         return START_STICKY
     }
@@ -105,7 +136,7 @@ class SensorLoggerService : Service(), SensorEventListener {
             mgr.createNotificationChannel(channel)
         }
 
-        val notification = NotificationCompat.Builder(this, channelId)
+        val notification: Notification = NotificationCompat.Builder(this, channelId)
             .setContentTitle("Sensor Logging Active")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .setOngoing(true)
@@ -171,38 +202,52 @@ class SensorLoggerService : Service(), SensorEventListener {
                         // ---- Update LA timing with sensor clock ----
                         val prevForLine = prevLaTsNs
                         val curr = sensorTsNs
-                        val dt = if (prevForLine == 0L) 0L else (curr - prevForLine).coerceAtLeast(0L)
-                        laClockNs += dt
+                        val dtNs = if (prevForLine == 0L) 0L else (curr - prevForLine).coerceAtLeast(0L)
+                        val dtSec = if (prevForLine == 0L) 0.0 else dtNs.toDouble() * 1e-9
+                        laClockSec += dtSec
                         prevLaTsNs = curr
 
                         // Update latest snapshot (use sensor timestamp for LA)
                         latestLA.ts = curr
                         System.arraycopy(values, 0, latestLA.v, 0, 3)
 
-                        // Compute/refresh P if we have orientation
+                        // Compute/refresh P (projection onto heading) if we have orientation
                         if (hasGravity && hasMagnetic) {
                             SensorManager.getRotationMatrix(rotationMatrix, null, gravity, magnetic)
                             val accDevice = values
-                            val accWorldX = rotationMatrix[0] * accDevice[0] + rotationMatrix[1] * accDevice[1] + rotationMatrix[2] * accDevice[2]
-                            val accWorldY = rotationMatrix[3] * accDevice[0] + rotationMatrix[4] * accDevice[1] + rotationMatrix[5] * accDevice[2]
+                            val accWorldX = rotationMatrix[0] * accDevice[0] + rotationMatrix[1] * accDevice[1] + rotationMatrix[2] * accDevice[2] // East
+                            val accWorldY = rotationMatrix[3] * accDevice[0] + rotationMatrix[4] * accDevice[1] + rotationMatrix[5] * accDevice[2] // North
                             val flatAcc = sqrt(accWorldX * accWorldX + accWorldY * accWorldY)
                             latestP = if (flatAcc != 0f) {
-                                accWorldX * sin(Math.toRadians(POC.toDouble())) +
-                                        accWorldY * cos(Math.toRadians(POC.toDouble()))
+                                accWorldX * dirFx + accWorldY * dirFy
                             } else 0.0
+                        } else {
+                            // Orientation not ready → treat P as 0.0 for V accumulation
+                            latestP = 0.0
                         }
 
-                        // ---- Per-sensor LA CSV (prevTs, currTs, clock, x,y,z, P) ----
+                        // ===== V accumulation in SECONDS =====
+                        if (prevForLine != 0L) {
+                            vAccum += dtSec * latestP
+                        }
+
+                        // ---- Per-sensor LA CSV (prevTs, currTs, clockSec, x,y,z, P, V) ----
                         runCatching {
                             val w = getWriter(sensorType) ?: return@runCatching
                             val line = buildString {
                                 append(prevForLine); append(",")
                                 append(curr); append(",")
-                                append(laClockNs); append(",")
+                                append(String.format(Locale.US, "%.6f", laClockSec)); append(",")
                                 append(String.format(Locale.US, "%.6f", values[0])); append(",")
                                 append(String.format(Locale.US, "%.6f", values[1])); append(",")
                                 append(String.format(Locale.US, "%.6f", values[2])); append(",")
-                                if (hasGravity && hasMagnetic) append(String.format(Locale.US, "%.5f", latestP)) else append("")
+                                if (hasGravity && hasMagnetic) {
+                                    append(String.format(Locale.US, "%.5f", latestP))
+                                } else {
+                                    append("")
+                                }
+                                append(",")
+                                append(String.format(Locale.US, "%.6f", vAccum))
                                 append("\n")
                             }
                             w.write(line); w.flush()
@@ -265,7 +310,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                         addSnapshot(latestMAG)
 
                         append(",")
-                        append(String.format(Locale.US, "%.5f", latestP))
+                        append(String.format(Locale.US, "%.5f", if (hasGravity && hasMagnetic) latestP else 0.0))
                         append("\n")
                     }
                     cw.write(line)
@@ -296,9 +341,9 @@ class SensorLoggerService : Service(), SensorEventListener {
             val writer = FileWriter(file, true)
             if (file.length() == 0L) {
                 val header = when (sensorType) {
-                    // New LA schema: prevTsNs, currTsNs, accumulatedClockNs, x, y, z, P
+                    // Updated LA schema: prevTsNs, currTsNs, accumulatedClockSec, x, y, z, P, V
                     Sensor.TYPE_LINEAR_ACCELERATION ->
-                        "prevLaTsNs,laTsNs,laClockNs,laX,laY,laZ,P\n"
+                        "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V\n"
                     else ->
                         "timestamp,val0,val1,val2\n"
                 }
