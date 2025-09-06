@@ -47,20 +47,36 @@ class SensorLoggerService : Service(), SensorEventListener {
     private val latestGRAV = Snapshot()
     private val latestMAG = Snapshot()
 
-    // For rotation & P computation
+    // Rotation providers
     private val gravity = FloatArray(3)
     private val magnetic = FloatArray(3)
     private var hasGravity = false
     private var hasMagnetic = false
-    private val rotationMatrix = FloatArray(9)
-    private val orientationVals = FloatArray(3) // [azimuth(Z), pitch(X), roll(Y)]
+
+    private val rotMatrixGM = FloatArray(9)
+    private val rotMatrixRV = FloatArray(9)
+    private val orientationValsGM = FloatArray(3) // [azimuth(Z), pitch(X), roll(Y)]
+    private val orientationValsRV = FloatArray(3)
+
+    // Rotation Vector (gyro-aided)
+    private var hasRV = false
+    private var latestRotTsNs: Long = 0L
+    private var rotVec: FloatArray = FloatArray(5) // allocate max, handle short vectors safely
 
     // Projection direction from UI azimuth (deg clockwise from North).
-    // World frame from getRotationMatrix: X=East, Y=North, Z=Up.
+    // World frame: X=East, Y=North, Z=Up.
     private var azimuthDeg: Double = 0.0
     private var dirFx: Double = 0.0   // East component = sin(az)
     private var dirFy: Double = 1.0   // North component = cos(az)
-    private var latestP: Double = 0.0 // m/s^2 along heading
+
+    // P components and accumulators
+    private var latestP_gm: Double = 0.0
+    private var latestP_rv: Double = 0.0
+    private var latestP_accGM: Double = 0.0
+
+    private var vAccum_gm: Double = 0.0     // integrates P_gm
+    private var vAccum_rv: Double = 0.0     // integrates P_rv
+    private var vAccum_accGM: Double = 0.0  // integrates P_accGM
 
     /** ===== Concurrency & lifecycle guards ===== */
     private val ioErrorHandler = CoroutineExceptionHandler { _, e ->
@@ -80,9 +96,6 @@ class SensorLoggerService : Service(), SensorEventListener {
     private var prevLaTsNs: Long = 0L           // last raw sensor ns
     private var laClockSec: Double = 0.0        // accumulated SECONDS since START
 
-    // ===== Velocity accumulator (per spec) =====
-    private var vAccum: Double = 0.0  // V[i]
-
     // Simple lock for consistency (used inside single-thread too for clarity)
     private val lock = Any()
 
@@ -96,18 +109,20 @@ class SensorLoggerService : Service(), SensorEventListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // START: open run and reset accumulators
+        // START
         isLogging = true
         writersOpen = true
 
-        // 1) Read azimuth from UI and precompute direction vector (X=East, Y=North)
+        // Read azimuth from UI and precompute direction vector (X=East, Y=North)
         azimuthDeg = intent?.getDoubleExtra(EXTRA_AZIMUTH_DEG, 0.0) ?: 0.0
         val azRad = Math.toRadians(azimuthDeg)
-        dirFx = sin(azRad) // along East
-        dirFy = cos(azRad) // along North
+        dirFx = sin(azRad) // East
+        dirFy = cos(azRad) // North
 
-        // 2) Reset integrators/clocks for a clean session
-        vAccum = 0.0
+        // Reset integrators/clocks
+        vAccum_gm = 0.0
+        vAccum_rv = 0.0
+        vAccum_accGM = 0.0
         prevLaTsNs = 0L
         laClockSec = 0.0
 
@@ -116,7 +131,6 @@ class SensorLoggerService : Service(), SensorEventListener {
     }
 
     override fun onDestroy() {
-        // STOP path: order matters
         isLogging = false
         unregisterSensors()
         serviceJob.cancelChildren()
@@ -163,7 +177,8 @@ class SensorLoggerService : Service(), SensorEventListener {
             Sensor.TYPE_LINEAR_ACCELERATION,
             Sensor.TYPE_ACCELEROMETER,
             Sensor.TYPE_GRAVITY,
-            Sensor.TYPE_MAGNETIC_FIELD
+            Sensor.TYPE_MAGNETIC_FIELD,
+            Sensor.TYPE_ROTATION_VECTOR
         ).forEach { type ->
             sensorManager.getDefaultSensor(type)?.let {
                 sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
@@ -187,10 +202,24 @@ class SensorLoggerService : Service(), SensorEventListener {
             Sensor.TYPE_GRAVITY -> {
                 System.arraycopy(values, 0, gravity, 0, 3)
                 hasGravity = true
+                latestGRAV.ts = sensorTsNs
+                System.arraycopy(values, 0, latestGRAV.v, 0, 3)
             }
             Sensor.TYPE_MAGNETIC_FIELD -> {
                 System.arraycopy(values, 0, magnetic, 0, 3)
                 hasMagnetic = true
+                latestMAG.ts = sensorTsNs
+                System.arraycopy(values, 0, latestMAG.v, 0, 3)
+            }
+            Sensor.TYPE_ROTATION_VECTOR -> {
+                latestRotTsNs = sensorTsNs
+                if (rotVec.size != values.size) {
+                    // Keep rotVec capacity >= incoming vector length
+                    rotVec = FloatArray(maxOf(5, values.size))
+                }
+                // Copy only the provided components
+                for (i in values.indices) rotVec[i] = values[i]
+                hasRV = true
             }
         }
 
@@ -200,7 +229,7 @@ class SensorLoggerService : Service(), SensorEventListener {
             synchronized(lock) {
                 when (sensorType) {
                     Sensor.TYPE_LINEAR_ACCELERATION -> {
-                        // ---- Update LA timing with sensor clock ----
+                        // ---- Update LA timing (sensor clock) ----
                         val prevForLine = prevLaTsNs
                         val curr = sensorTsNs
                         val dtNs = if (prevForLine == 0L) 0L else (curr - prevForLine).coerceAtLeast(0L)
@@ -208,66 +237,122 @@ class SensorLoggerService : Service(), SensorEventListener {
                         laClockSec += dtSec
                         prevLaTsNs = curr
 
-                        // Update latest snapshot (use sensor timestamp for LA)
+                        // Update latest LA snapshot
                         latestLA.ts = curr
                         System.arraycopy(values, 0, latestLA.v, 0, 3)
+                        val laX = values[0]; val laY = values[1]; val laZ = values[2]
 
-                        // Compute/refresh P (projection onto heading) if we have orientation
-                        var oriAgeSecStr = ""
-                        var yawDegUsedStr = ""
+                        // Prepare orientation(s)
+                        var haveGM = false
+                        var yawGMdeg = Double.NaN
+                        var oriAgeGM = Double.NaN
                         if (hasGravity && hasMagnetic) {
-                            SensorManager.getRotationMatrix(rotationMatrix, null, gravity, magnetic)
-
-                            // World-frame acceleration (X=East, Y=North)
-                            val accDevice = values
-                            val accWorldX = rotationMatrix[0] * accDevice[0] + rotationMatrix[1] * accDevice[1] + rotationMatrix[2] * accDevice[2] // East
-                            val accWorldY = rotationMatrix[3] * accDevice[0] + rotationMatrix[4] * accDevice[1] + rotationMatrix[5] * accDevice[2] // North
-                            val flatAcc = sqrt(accWorldX * accWorldX + accWorldY * accWorldY)
-
-                            latestP = if (flatAcc != 0f) {
-                                accWorldX * dirFx + accWorldY * dirFy
-                            } else 0.0
-
-                            // --- Instrumentation: orientation age + yaw used ---
-                            val oriTsNs = maxOf(latestGRAV.ts, latestMAG.ts)
-                            val oriAgeSec = ((sensorTsNs - oriTsNs).coerceAtLeast(0L)) * 1e-9
-                            SensorManager.getOrientation(rotationMatrix, orientationVals)
-                            val yawDegUsed = Math.toDegrees(orientationVals[0].toDouble())
-
-                            oriAgeSecStr = String.format(Locale.US, "%.4f", oriAgeSec)
-                            yawDegUsedStr = String.format(Locale.US, "%.1f", yawDegUsed)
-                        } else {
-                            // Orientation not ready → keep P at 0.0 for V accumulation; leave oriAgeSec/yaw blank
-                            latestP = 0.0
+                            // Build GM rotation
+                            SensorManager.getRotationMatrix(rotMatrixGM, null, gravity, magnetic)
+                            SensorManager.getOrientation(rotMatrixGM, orientationValsGM)
+                            yawGMdeg = Math.toDegrees(orientationValsGM[0].toDouble())
+                            val oriTs = maxOf(latestGRAV.ts, latestMAG.ts)
+                            oriAgeGM = ((curr - oriTs).coerceAtLeast(0L)) * 1e-9
+                            haveGM = true
                         }
 
-                        // ===== V accumulation in SECONDS =====
+                        var haveRV = false
+                        var yawRVdeg = Double.NaN
+                        var oriAgeRV = Double.NaN
+                        if (hasRV) {
+                            // Build RV rotation
+                            SensorManager.getRotationMatrixFromVector(rotMatrixRV, rotVec)
+                            SensorManager.getOrientation(rotMatrixRV, orientationValsRV)
+                            yawRVdeg = Math.toDegrees(orientationValsRV[0].toDouble())
+                            oriAgeRV = ((curr - latestRotTsNs).coerceAtLeast(0L)) * 1e-9
+                            haveRV = true
+                        }
+
+                        // ----- Compute P along UI heading using different pipelines -----
+                        // (World frame: X=East, Y=North)
+                        latestP_gm = 0.0
+                        latestP_rv = 0.0
+                        latestP_accGM = 0.0
+
+                        if (haveGM) {
+                            val accWorldX_gm = rotMatrixGM[0]*laX + rotMatrixGM[1]*laY + rotMatrixGM[2]*laZ // East
+                            val accWorldY_gm = rotMatrixGM[3]*laX + rotMatrixGM[4]*laY + rotMatrixGM[5]*laZ // North
+                            latestP_gm = accWorldX_gm * dirFx + accWorldY_gm * dirFy
+                        }
+
+                        if (haveRV) {
+                            val accWorldX_rv = rotMatrixRV[0]*laX + rotMatrixRV[1]*laY + rotMatrixRV[2]*laZ // East
+                            val accWorldY_rv = rotMatrixRV[3]*laX + rotMatrixRV[4]*laY + rotMatrixRV[5]*laZ // North
+                            latestP_rv = accWorldX_rv * dirFx + accWorldY_rv * dirFy
+                        }
+
+                        // ACC-based recomputation (bypasses vendor LA filtering)
+                        var accAgeSec = Double.NaN
+                        if (haveGM && latestACC.ts != 0L) {
+                            val ax = latestACC.v[0]; val ay = latestACC.v[1]; val az = latestACC.v[2]
+                            accAgeSec = ((curr - latestACC.ts).coerceAtLeast(0L)) * 1e-9
+                            val aWorldX = rotMatrixGM[0]*ax + rotMatrixGM[1]*ay + rotMatrixGM[2]*az
+                            val aWorldY = rotMatrixGM[3]*ax + rotMatrixGM[4]*ay + rotMatrixGM[5]*az
+                            val aWorldZ = rotMatrixGM[6]*ax + rotMatrixGM[7]*ay + rotMatrixGM[8]*az
+                            // Remove gravity in world frame
+                            val linWorldX = aWorldX
+                            val linWorldY = aWorldY
+                            val linWorldZ = aWorldZ - SensorManager.STANDARD_GRAVITY
+                            // Project onto heading (XY only)
+                            latestP_accGM = linWorldX * dirFx + linWorldY * dirFy
+                            // (linWorldZ not used for P; logged path is horizontal P)
+                        }
+
+                        // ===== Integrate to V =====
                         if (prevForLine != 0L) {
-                            vAccum += dtSec * latestP
+                            if (haveGM) vAccum_gm += dtSec * latestP_gm
+                            if (haveRV) vAccum_rv += dtSec * latestP_rv
+                            if (!latestP_accGM.isNaN()) vAccum_accGM += dtSec * latestP_accGM
                         }
 
-                        // ---- Per-sensor LA CSV (prevTs, currTs, clockSec, x,y,z, P, V, oriAgeSec, yawDegUsed) ----
+                        // ---- LA CSV line ----
                         runCatching {
                             val w = getWriter(sensorType) ?: return@runCatching
                             val line = buildString {
+                                // Core timing & LA
                                 append(prevForLine); append(",")
                                 append(curr); append(",")
                                 append(String.format(Locale.US, "%.6f", laClockSec)); append(",")
-                                append(String.format(Locale.US, "%.6f", values[0])); append(",")
-                                append(String.format(Locale.US, "%.6f", values[1])); append(",")
-                                append(String.format(Locale.US, "%.6f", values[2])); append(",")
-                                // P
-                                if (hasGravity && hasMagnetic) {
-                                    append(String.format(Locale.US, "%.5f", latestP))
-                                } else {
-                                    append("")
-                                }
+                                append(String.format(Locale.US, "%.6f", laX)); append(",")
+                                append(String.format(Locale.US, "%.6f", laY)); append(",")
+                                append(String.format(Locale.US, "%.6f", laZ)); append(",")
+
+                                // Primary P,V (GM) to keep compatibility with earlier analyses
+                                if (haveGM) append(String.format(Locale.US, "%.5f", latestP_gm)) else append("")
                                 append(",")
-                                // V
-                                append(String.format(Locale.US, "%.6f", vAccum))
-                                // Instrumentation columns
-                                append(","); append(oriAgeSecStr)
-                                append(","); append(yawDegUsedStr)
+                                if (haveGM) append(String.format(Locale.US, "%.6f", vAccum_gm)) else append("")
+                                // === Diagnostics ===
+                                append(",")
+                                // oriAgeGM, yawGMdeg
+                                if (haveGM) append(String.format(Locale.US, "%.4f", oriAgeGM)) else append("")
+                                append(",")
+                                if (haveGM) append(String.format(Locale.US, "%.1f", yawGMdeg)) else append("")
+
+                                append(",")
+                                // P_rv, V_rv
+                                if (haveRV) append(String.format(Locale.US, "%.5f", latestP_rv)) else append("")
+                                append(",")
+                                if (haveRV) append(String.format(Locale.US, "%.6f", vAccum_rv)) else append("")
+
+                                append(",")
+                                // oriAgeRV, yawRVdeg
+                                if (haveRV) append(String.format(Locale.US, "%.4f", oriAgeRV)) else append("")
+                                append(",")
+                                if (haveRV) append(String.format(Locale.US, "%.1f", yawRVdeg)) else append("")
+
+                                append(",")
+                                // P_accGM, V_accGM, accAgeSec
+                                if (!latestP_accGM.isNaN()) append(String.format(Locale.US, "%.5f", latestP_accGM)) else append("")
+                                append(",")
+                                if (!vAccum_accGM.isNaN()) append(String.format(Locale.US, "%.6f", vAccum_accGM)) else append("")
+                                append(",")
+                                if (!accAgeSec.isNaN()) append(String.format(Locale.US, "%.4f", accAgeSec)) else append("")
+
                                 append("\n")
                             }
                             w.write(line); w.flush()
@@ -277,38 +362,27 @@ class SensorLoggerService : Service(), SensorEventListener {
                     }
 
                     Sensor.TYPE_ACCELEROMETER -> {
-                        latestACC.ts = sensorTsNs // use sensor ts for ACC too (more consistent)
+                        latestACC.ts = sensorTsNs
                         System.arraycopy(values, 0, latestACC.v, 0, 3)
+                        writeSimple(sensorType, sensorTsNs, values)
                     }
                     Sensor.TYPE_GRAVITY -> {
-                        latestGRAV.ts = sensorTsNs
-                        System.arraycopy(values, 0, latestGRAV.v, 0, 3)
+                        // (already copied above)
+                        writeSimple(sensorType, sensorTsNs, values)
                     }
                     Sensor.TYPE_MAGNETIC_FIELD -> {
-                        latestMAG.ts = sensorTsNs
-                        System.arraycopy(values, 0, latestMAG.v, 0, 3)
+                        // (already copied above)
+                        writeSimple(sensorType, sensorTsNs, values)
+                    }
+                    Sensor.TYPE_ROTATION_VECTOR -> {
+                        // Also log the raw rotation vector for reference (optional)
+                        writeSimple(sensorType, sensorTsNs, values)
                     }
                 }
 
                 if (!isLogging || !writersOpen) return@synchronized
 
-                // ---- Per-sensor CSV for non-LA sensors (timestamp,val0,val1,val2) ----
-                if (sensorType != Sensor.TYPE_LINEAR_ACCELERATION) {
-                    runCatching {
-                        val singleWriter = getWriter(sensorType) ?: return@runCatching
-                        val line = buildString {
-                            append(sensorTsNs)
-                            values.forEach { append(","); append(it) }
-                            append("\n")
-                        }
-                        singleWriter.write(line)
-                        singleWriter.flush()
-                    }.onFailure {
-                        if (isLogging) android.util.Log.e("SensorLogger", "per-sensor write failed", it)
-                    }
-                }
-
-                // ---- Combined snapshot CSV (sysTs, laTsNs..., accTsNs..., gravTsNs..., magTsNs..., P) ----
+                // ---- Combined snapshot CSV remains as before ----
                 runCatching {
                     val cw = getCombinedWriter() ?: return@runCatching
                     val line = buildString {
@@ -330,7 +404,9 @@ class SensorLoggerService : Service(), SensorEventListener {
                         addSnapshot(latestMAG)
 
                         append(",")
-                        append(String.format(Locale.US, "%.5f", if (hasGravity && hasMagnetic) latestP else 0.0))
+                        // Keep P column as GM P if available; else 0
+                        val pForCombined = if (hasGravity && hasMagnetic) latestP_gm else 0.0
+                        append(String.format(Locale.US, "%.5f", pForCombined))
                         append("\n")
                     }
                     cw.write(line)
@@ -339,6 +415,20 @@ class SensorLoggerService : Service(), SensorEventListener {
                     if (isLogging) android.util.Log.e("SensorLogger", "combined write failed", it)
                 }
             }
+        }
+    }
+
+    private fun writeSimple(sensorType: Int, ts: Long, values: FloatArray) {
+        runCatching {
+            val w = getWriter(sensorType) ?: return@runCatching
+            val line = buildString {
+                append(ts)
+                values.forEach { append(","); append(it) }
+                append("\n")
+            }
+            w.write(line); w.flush()
+        }.onFailure {
+            if (isLogging) android.util.Log.e("SensorLogger", "per-sensor write failed", it)
         }
     }
 
@@ -352,6 +442,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                 Sensor.TYPE_ACCELEROMETER      -> "acc"
                 Sensor.TYPE_GRAVITY            -> "grav"
                 Sensor.TYPE_MAGNETIC_FIELD     -> "mag"
+                Sensor.TYPE_ROTATION_VECTOR    -> "rotvec"
                 else                           -> "other"
             }
 
@@ -361,10 +452,10 @@ class SensorLoggerService : Service(), SensorEventListener {
             val writer = FileWriter(file, true)
             if (file.length() == 0L) {
                 val header = when (sensorType) {
-                    // Updated LA schema with instrumentation:
-                    // prevLaTsNs, laTsNs, laClockSec, laX, laY, laZ, P, V, oriAgeSec, yawDegUsed
+                    // LA CSV: primary (GM) + diagnostics
+                    // prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg,P_rv,V_rv,oriAgeRV,yawRVdeg,P_accGM,V_accGM,accAgeSec
                     Sensor.TYPE_LINEAR_ACCELERATION ->
-                        "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeSec,yawDegUsed\n"
+                        "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg,P_rv,V_rv,oriAgeRV,yawRVdeg,P_accGM,V_accGM,accAgeSec\n"
                     else ->
                         "timestamp,val0,val1,val2\n"
                 }

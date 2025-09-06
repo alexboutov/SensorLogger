@@ -16,86 +16,166 @@ SESSION REQUESTS
 
 CHANGES SINCE LAST SUMMARY
 
-UI updated: replaced two separate START/STOP buttons with a single toggle button (startStopButton).
-MainActivity.kt updated accordingly (single click listener, isLogging flag, dynamic label).
-Key decision added: before generating drop-in update for any file, current version must be pasted.
+Instrumentation added for orientation-staleness test (E1):
+- LA CSV now logs oriAgeGM and yawGMdeg for each LA row.
+- Header: prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg
+- oriTsNs = max(latestGRAV.ts, latestMAG.ts)
+- oriAgeGM = max(0, laTsNs - oriTsNs) * 1e-9 (seconds)
+- yawGMdeg = degrees(getOrientation(R_gm)[0])
 
-Service stability: fixed STOP crash by flipping isLogging=false first, unregistering sensors, cancelling pending write jobs, then closing writers; guarded all writes with isLogging/writersOpen and try/catch.
-Write ordering: moved all CSV writes onto a single-threaded dispatcher (FIFO) so events are serialized in submission order.
-Timing source: switched linear-acceleration timing to sensor monotonic clock (event.timestamp, ns since boot) to eliminate negative dt; applied sensor timestamps to ACC/GRAV/MAG snapshots as well.
-LA CSV schema changed: now logs prevLaTsNs, laTsNs, laClockNs, laX, laY, laZ, P. (dt can be derived as laTsNs - prevLaTsNs.)
-Combined CSV updated: sysTs (wall clock) plus per-sensor monotonic timestamps and values for LA/ACC/GRAV/MAG, and P.
+Behavior unchanged:
+- Same rotation source (R_gm from GRAVITY + MAGNETIC_FIELD)
+- Same projection of LA onto UI heading
+- Same integration on LA clock; only extra columns were added
+
+Confirmed: azimuth value from UI is used to compute forward direction in world frame:
+- dirFx = sin(radians(azimuthDeg))  // East component
+- dirFy = cos(radians(azimuthDeg))  // North component
+
+Service stability and ordering (retained from prior summary):
+- STOP: set isLogging=false first, unregister sensors, cancel pending writes, then close writers
+- All writes guarded by isLogging/writersOpen
+- Single-threaded dispatcher ensures FIFO write order
+
+Timing:
+- Linear-acceleration timing uses event.timestamp (monotonic ns)
+- laClockSec is accumulated seconds since START
+- ACC/GRAV/MAG snapshots use their own sensor timestamps
+
+CSV schemas updated:
+- LA: prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg
+- ACC/GRAV/MAG: timestamp,val0,val1,val2
+- Combined: sysTs plus per-sensor monotonic timestamps and values, and P (GM)
 
 OPEN ISSUES
 
-(none for CSV aggregation) - consolidated snapshot CSV implemented and logging on every sensor update. Open new issues as needed.
+- Need evidence from E1 to confirm or refute orientation-staleness as primary source of V error
+- Keep other hypotheses queued but do not change behavior until E1 is analyzed
 
 DONE TODAY
 
-Implemented serialized write queue (single-thread executor) to preserve line order.
-Adopted sensor monotonic timestamps; added LA running clock (laClockNs).
-Updated per-sensor and combined CSV formats as described; verified non-negative dt on LA.
-Retained foreground service and wakelock; app now remains running after STOP and is ready for the next START.
+- Produced single-change plan for E1 (instrument orientation age and yaw)
+- Delivered full replacement code that adds columns without changing behavior
+- Updated project summary to reflect no-ZUPT decision and one-change workflow
 
 ENVIRONMENT SETUP
 
-Initially, JAVA_HOME was not set; builds failed.
-Installed Oracle JDK 17 on Windows and set JAVA_HOME:
-C:\Program Files\Java\jdk-17
-PATH updated to include %JAVA_HOME%\bin.
-Android Studio JBR present at:
-C:\Program Files\Android\Android Studio\jbr
-(Gradle forced to use real JDK via org.gradle.java.home.)
-Removed reliance on "C:\Program Files\Common Files\Oracle\Java\javapath".
+- JAVA_HOME set to JDK 17 on Windows
+- PATH includes %JAVA_HOME%\bin
+- Android Studio JBR present but Gradle forced to use JDK 17 via org.gradle.java.home
+- If device not detected over USB, try another port (observed fix on SM-G930V)
 
 GRADLE AND BUILD TOOLS
 
-Gradle wrapper: 8.6
-Kotlin: 1.9.20 (from Gradle -v)
-Fixed malformed distribution URL in gradle-wrapper.properties earlier.
-Forced Gradle JDK:
-org.gradle.java.home=C:\ Program Files\Java\jdk-17
-settings.gradle uses google() and mavenCentral().
+- Gradle wrapper: 8.6
+- Kotlin: 1.9.20 (from Gradle -v)
+- org.gradle.java.home=C:\Program Files\Java\jdk-17
+- Repos: google(), mavenCentral()
 
 APP AND SDK CONFIGURATION
 
-compileSdk 34
-defaultConfig: minSdk 26, targetSdk 34
-Java/Kotlin levels: Java 17, jvmTarget 17
-Dependencies (core set):
-implementation 'androidx.core:core-ktx:1.12.0'
-implementation 'androidx.core:core:1.12.0'
-implementation 'androidx.appcompat:appcompat:1.6.1'
-implementation 'com.google.android.material:material:1.9.0'
-implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
-implementation 'androidx.activity:activity-ktx:1.8.2'
-implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1'
-ViewBinding: ON
-Data Binding: OFF
-No Room, Retrofit, or Compose.
+- compileSdk 34
+- defaultConfig: minSdk 26, targetSdk 34
+- Java/Kotlin: Java 17, jvmTarget 17
+- Dependencies (core set):
+  androidx.core:core-ktx:1.12.0
+  androidx.core:core:1.12.0
+  androidx.appcompat:appcompat:1.6.1
+  com.google.android.material:material:1.9.0
+  androidx.constraintlayout:constraintlayout:2.1.4
+  androidx.activity:activity-ktx:1.8.2
+  org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1
+- ViewBinding: ON
+- Data Binding: OFF
+- No Room, Retrofit, or Compose
 
 ANDROIDMANIFEST
 
-Removed package="com.example.sensorlogger" (namespace set in Gradle).
-Added:
-<uses-permission android:name="android.permission.WAKE_LOCK" />
+- Removed package attribute (namespace set in Gradle)
+- Uses permission: WAKE_LOCK
 
 BUILD AND RUN PROGRESS
 
-Resolved Gradle transform cache issues by killing java.exe and deleting .gradle\caches\transforms-4.
-Resolved jlink/JBR issue by forcing Gradle to use JDK 17.
-Builds succeed; app deploys and runs on device.
-STOP behavior: pressing STOP halts SensorLoggerService without process crash; app remains open and can START again.
-Timestamp stability: LA rows now use monotonic sensor timestamps; negative dt eliminated. Combined CSV uses sysTs plus sensor ts for each sensor.
-Device connection issue (USB/Wi-Fi): After attempting to connect a different phone, SM-G930V did not appear in the device list despite reconnecting USB, restarting the phone and Android Studio, confirming Developer Options were on, and using Connection Assistant actions (Rescan Devices, Restart ADB Server). Switching to a different laptop USB port immediately made SM-G930V appear. Workaround noted: try a different USB port if the device is missing.
+- App builds and runs; foreground service with wakelock
+- START/STOP toggle works; no crash on STOP
+- CSV files generated with monotonic sensor timestamps
+- With E1 instrumentation, behavior is unchanged; LA CSV has two additional diagnostic columns
 
 PHYSICAL DEVICE TESTING
 
-Device: Samsung SM-G930V (Android 8.0, API 26)
-App runs; START/STOP toggle works; CSV files generated and copied from device; stop/start cycles stable.
+- Device: Samsung SM-G930V (Android 8.0, API 26)
+- Desk tests show reasonable P sign and direction
+- Post-motion V offset observed in some runs, motivating E1
 
 KEY DECISIONS AND PREFERENCES
 
-Keep project minimal and focused.
-Only essential libraries; avoid optional tech unless explicitly requested.
-Before generating drop-in update for any file, the current version of that file must first be pasted/provided in the chat to prevent unintended changes and ensure consistency.
+- No ZUPT. Do not mask issues; expose and fix root causes
+- Single-change workflow: make exactly one change, test, analyze, decide, then proceed
+- Keep project minimal and focused (only essential libraries)
+- Before generating a drop-in update for any file, paste the current version first to ensure consistency
+
+CURRENT BASELINE
+
+- Orientation: R_gm = getRotationMatrix(gravity, magnetic)  (world: X=East, Y=North, Z=Up)
+- Forward heading from UI azimuthDeg:
+  dirFx = sin(radians(azimuthDeg)), dirFy = cos(radians(azimuthDeg))
+- Projection: P = ax_world * dirFx + ay_world * dirFy
+- Integration: V[i] = V[i-1] + P[i] * dt, with dt from LA timestamps
+- Files: per-sensor CSVs plus combined snapshot CSV
+
+HYPOTHESES TO TEST
+
+H1. Orientation staleness (GRAV+MAG) during motion skews P
+H2. Use orientation cadence for dt and integrate only when orientation is fresh
+H3. Low-pass filter LA to reduce sharp swings (tune cutoff)
+H4. Newer hardware with faster GRAV+MAG reduces lag
+H5. Gyro-aided orientation (Rotation Vector) improves projection under dynamics
+H6. Use ACC minus gravity instead of vendor LA
+H7. Sensor fusion caveats: GRAV low-passed and MAG noisy; cross-sensor timestamp skew matters
+
+SINGLE-CHANGE EXPERIMENT QUEUE
+
+E1. Log GM orientation age and yaw (diagnostic only; no behavior change)
+E2. Add RV orientation alongside GM; log P_rv, V_rv, oriAgeRV, yawRVdeg (diagnostic only)
+E3. Compare ACC - g (world frame) vs LA for projection and integration (diagnostic only)
+E4. Gate integration by orientation freshness threshold (behavior change)
+E5. Integrate on orientation cadence using latest LA (behavior change)
+E6. Low-pass filter LA (behavior change)
+E7. Repeat tests on newer hardware (environment change)
+
+TEST PROTOCOL
+
+1) Place phone with known heading; set azimuth in UI
+2) Phases: Still >= 5 s -> Move 1-3 s -> Still >= 5 s
+3) Save CSVs and note scenario (desk, location, device)
+4) Plot oriAgeGM, P, V vs time; compute stillness metrics (mean V, std V)
+5) Decision: keep or reject the single change based on offset reduction and responsiveness
+
+FILE SCHEMAS
+
+LA (with E1):
+prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg
+
+ACC/GRAV/MAG:
+timestamp,val0,val1,val2
+
+Combined:
+sysTs,laTs,laX,laY,laZ,accTs,accX,accY,accZ,gravTs,gravX,gravY,gravZ,magTs,magX,magY,magZ,P
+
+NEXT ACTION
+
+- Run E1 desk tests in two locations (old desk and new desk)
+- Share LA CSV and quick plots of oriAgeGM, P, V
+- Decide whether stale orientation explains post-motion V offsets
+
+PARKING LOT / OPEN QUESTIONS
+
+- What oriAge threshold is acceptable in your environments (start with 20-40 ms)?
+- Does RV hold up indoors at your locations?
+- What LPF cutoff preserves swimmer dynamics without hiding real accelerations?
+- Mounting repeatability across desks and locations?
+
+DECISIONS LOG
+
+- ZUPT: excluded by design
+- Workflow: one change per experiment; measure -> decide -> proceed
