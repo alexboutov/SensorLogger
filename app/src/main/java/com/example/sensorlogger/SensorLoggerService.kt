@@ -53,6 +53,7 @@ class SensorLoggerService : Service(), SensorEventListener {
     private var hasGravity = false
     private var hasMagnetic = false
     private val rotationMatrix = FloatArray(9)
+    private val orientationVals = FloatArray(3) // [azimuth(Z), pitch(X), roll(Y)]
 
     // Projection direction from UI azimuth (deg clockwise from North).
     // World frame from getRotationMatrix: X=East, Y=North, Z=Up.
@@ -212,17 +213,31 @@ class SensorLoggerService : Service(), SensorEventListener {
                         System.arraycopy(values, 0, latestLA.v, 0, 3)
 
                         // Compute/refresh P (projection onto heading) if we have orientation
+                        var oriAgeSecStr = ""
+                        var yawDegUsedStr = ""
                         if (hasGravity && hasMagnetic) {
                             SensorManager.getRotationMatrix(rotationMatrix, null, gravity, magnetic)
+
+                            // World-frame acceleration (X=East, Y=North)
                             val accDevice = values
                             val accWorldX = rotationMatrix[0] * accDevice[0] + rotationMatrix[1] * accDevice[1] + rotationMatrix[2] * accDevice[2] // East
                             val accWorldY = rotationMatrix[3] * accDevice[0] + rotationMatrix[4] * accDevice[1] + rotationMatrix[5] * accDevice[2] // North
                             val flatAcc = sqrt(accWorldX * accWorldX + accWorldY * accWorldY)
+
                             latestP = if (flatAcc != 0f) {
                                 accWorldX * dirFx + accWorldY * dirFy
                             } else 0.0
+
+                            // --- Instrumentation: orientation age + yaw used ---
+                            val oriTsNs = maxOf(latestGRAV.ts, latestMAG.ts)
+                            val oriAgeSec = ((sensorTsNs - oriTsNs).coerceAtLeast(0L)) * 1e-9
+                            SensorManager.getOrientation(rotationMatrix, orientationVals)
+                            val yawDegUsed = Math.toDegrees(orientationVals[0].toDouble())
+
+                            oriAgeSecStr = String.format(Locale.US, "%.4f", oriAgeSec)
+                            yawDegUsedStr = String.format(Locale.US, "%.1f", yawDegUsed)
                         } else {
-                            // Orientation not ready → treat P as 0.0 for V accumulation
+                            // Orientation not ready → keep P at 0.0 for V accumulation; leave oriAgeSec/yaw blank
                             latestP = 0.0
                         }
 
@@ -231,7 +246,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                             vAccum += dtSec * latestP
                         }
 
-                        // ---- Per-sensor LA CSV (prevTs, currTs, clockSec, x,y,z, P, V) ----
+                        // ---- Per-sensor LA CSV (prevTs, currTs, clockSec, x,y,z, P, V, oriAgeSec, yawDegUsed) ----
                         runCatching {
                             val w = getWriter(sensorType) ?: return@runCatching
                             val line = buildString {
@@ -241,13 +256,18 @@ class SensorLoggerService : Service(), SensorEventListener {
                                 append(String.format(Locale.US, "%.6f", values[0])); append(",")
                                 append(String.format(Locale.US, "%.6f", values[1])); append(",")
                                 append(String.format(Locale.US, "%.6f", values[2])); append(",")
+                                // P
                                 if (hasGravity && hasMagnetic) {
                                     append(String.format(Locale.US, "%.5f", latestP))
                                 } else {
                                     append("")
                                 }
                                 append(",")
+                                // V
                                 append(String.format(Locale.US, "%.6f", vAccum))
+                                // Instrumentation columns
+                                append(","); append(oriAgeSecStr)
+                                append(","); append(yawDegUsedStr)
                                 append("\n")
                             }
                             w.write(line); w.flush()
@@ -341,9 +361,10 @@ class SensorLoggerService : Service(), SensorEventListener {
             val writer = FileWriter(file, true)
             if (file.length() == 0L) {
                 val header = when (sensorType) {
-                    // Updated LA schema: prevTsNs, currTsNs, accumulatedClockSec, x, y, z, P, V
+                    // Updated LA schema with instrumentation:
+                    // prevLaTsNs, laTsNs, laClockSec, laX, laY, laZ, P, V, oriAgeSec, yawDegUsed
                     Sensor.TYPE_LINEAR_ACCELERATION ->
-                        "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V\n"
+                        "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeSec,yawDegUsed\n"
                     else ->
                         "timestamp,val0,val1,val2\n"
                 }
@@ -383,5 +404,9 @@ class SensorLoggerService : Service(), SensorEventListener {
             closeQuietly(combinedWriter)
             combinedWriter = null
         }
+    }
+
+    companion object {
+        const val EXTRA_AZIMUTH_DEG = "extra_azimuth_deg"
     }
 }
