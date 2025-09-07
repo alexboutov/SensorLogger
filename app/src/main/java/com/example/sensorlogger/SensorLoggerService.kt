@@ -26,8 +26,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.Date
 import java.util.concurrent.Executors
-import kotlin.math.cos
-import kotlin.math.sin
+import kotlin.math.abs
 import kotlin.math.sqrt
 
 class SensorLoggerService : Service(), SensorEventListener {
@@ -61,7 +60,7 @@ class SensorLoggerService : Service(), SensorEventListener {
     // Rotation Vector (gyro-aided)
     private var hasRV = false
     private var latestRotTsNs: Long = 0L
-    private var rotVec: FloatArray = FloatArray(5) // allocate max, handle short vectors safely
+    private var rotVec: FloatArray = FloatArray(5)
 
     // Projection direction from UI azimuth (deg clockwise from North).
     // World frame: X=East, Y=North, Z=Up.
@@ -96,8 +95,43 @@ class SensorLoggerService : Service(), SensorEventListener {
     private var prevLaTsNs: Long = 0L           // last raw sensor ns
     private var laClockSec: Double = 0.0        // accumulated SECONDS since START
 
-    // Simple lock for consistency (used inside single-thread too for clarity)
+    // Simple lock for consistency
     private val lock = Any()
+
+    // ===== Quiet-tail bias tracking (GM path; ACC->world) =====
+    // Quiet detection thresholds (tweak if needed)
+    private val QUIET_P_ABS_MAX = 0.05          // m/s^2
+    private val QUIET_LA_NORM_MAX = 0.30        // m/s^2
+    private val TAIL_CAPACITY = 1000            // ~5s @ 200 Hz
+
+    private class TailAverager(private val capacity: Int) {
+        private val buf = DoubleArray(capacity)
+        private var head = 0
+        private var count = 0
+        private var sum = 0.0
+
+        fun clear() { head = 0; count = 0; sum = 0.0 }
+        fun push(v: Double) {
+            if (capacity == 0) return
+            if (count < capacity) {
+                buf[head] = v
+                sum += v
+                head = (head + 1) % capacity
+                count += 1
+            } else {
+                val old = buf[head]
+                sum -= old
+                buf[head] = v
+                sum += v
+                head = (head + 1) % capacity
+            }
+        }
+        fun meanOrNull(): Double? = if (count == 0) null else (sum / count)
+    }
+
+    private val tailMean_gBiasZ = TailAverager(TAIL_CAPACITY)  // Z bias (aWorldZ - g)
+    private val tailMean_linX   = TailAverager(TAIL_CAPACITY)  // horizontal X bias (aWorldX)
+    private val tailMean_linY   = TailAverager(TAIL_CAPACITY)  // horizontal Y bias (aWorldY)
 
     override fun onCreate() {
         super.onCreate()
@@ -109,15 +143,15 @@ class SensorLoggerService : Service(), SensorEventListener {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // START
         isLogging = true
         writersOpen = true
 
         // Read azimuth from UI and precompute direction vector (X=East, Y=North)
         azimuthDeg = intent?.getDoubleExtra(EXTRA_AZIMUTH_DEG, 0.0) ?: 0.0
         val azRad = Math.toRadians(azimuthDeg)
-        dirFx = sin(azRad) // East
-        dirFy = cos(azRad) // North
+        // East = sin(az), North = cos(az)
+        dirFx = kotlin.math.sin(azRad)
+        dirFy = kotlin.math.cos(azRad)
 
         // Reset integrators/clocks
         vAccum_gm = 0.0
@@ -125,6 +159,11 @@ class SensorLoggerService : Service(), SensorEventListener {
         vAccum_accGM = 0.0
         prevLaTsNs = 0L
         laClockSec = 0.0
+
+        // Reset tail averages
+        tailMean_gBiasZ.clear()
+        tailMean_linX.clear()
+        tailMean_linY.clear()
 
         registerSensors()
         return START_STICKY
@@ -214,10 +253,8 @@ class SensorLoggerService : Service(), SensorEventListener {
             Sensor.TYPE_ROTATION_VECTOR -> {
                 latestRotTsNs = sensorTsNs
                 if (rotVec.size != values.size) {
-                    // Keep rotVec capacity >= incoming vector length
                     rotVec = FloatArray(maxOf(5, values.size))
                 }
-                // Copy only the provided components
                 for (i in values.indices) rotVec[i] = values[i]
                 hasRV = true
             }
@@ -240,14 +277,16 @@ class SensorLoggerService : Service(), SensorEventListener {
                         // Update latest LA snapshot
                         latestLA.ts = curr
                         System.arraycopy(values, 0, latestLA.v, 0, 3)
-                        val laX = values[0]; val laY = values[1]; val laZ = values[2]
+                        val laXf = values[0]; val laYf = values[1]; val laZf = values[2]
+                        val laXd = laXf.toDouble()
+                        val laYd = laYf.toDouble()
+                        val laZd = laZf.toDouble()
 
                         // Prepare orientation(s)
                         var haveGM = false
                         var yawGMdeg = Double.NaN
                         var oriAgeGM = Double.NaN
                         if (hasGravity && hasMagnetic) {
-                            // Build GM rotation
                             SensorManager.getRotationMatrix(rotMatrixGM, null, gravity, magnetic)
                             SensorManager.getOrientation(rotMatrixGM, orientationValsGM)
                             yawGMdeg = Math.toDegrees(orientationValsGM[0].toDouble())
@@ -260,7 +299,6 @@ class SensorLoggerService : Service(), SensorEventListener {
                         var yawRVdeg = Double.NaN
                         var oriAgeRV = Double.NaN
                         if (hasRV) {
-                            // Build RV rotation
                             SensorManager.getRotationMatrixFromVector(rotMatrixRV, rotVec)
                             SensorManager.getOrientation(rotMatrixRV, orientationValsRV)
                             yawRVdeg = Math.toDegrees(orientationValsRV[0].toDouble())
@@ -268,39 +306,54 @@ class SensorLoggerService : Service(), SensorEventListener {
                             haveRV = true
                         }
 
-                        // ----- Compute P along UI heading using different pipelines -----
-                        // (World frame: X=East, Y=North)
+                        // ----- Compute P along UI heading (GM & RV) -----
                         latestP_gm = 0.0
                         latestP_rv = 0.0
                         latestP_accGM = 0.0
 
                         if (haveGM) {
-                            val accWorldX_gm = rotMatrixGM[0]*laX + rotMatrixGM[1]*laY + rotMatrixGM[2]*laZ // East
-                            val accWorldY_gm = rotMatrixGM[3]*laX + rotMatrixGM[4]*laY + rotMatrixGM[5]*laZ // North
+                            // World (GM) from LA (already gravity-free)
+                            val m0 = rotMatrixGM[0].toDouble(); val m1 = rotMatrixGM[1].toDouble(); val m2 = rotMatrixGM[2].toDouble()
+                            val m3 = rotMatrixGM[3].toDouble(); val m4 = rotMatrixGM[4].toDouble(); val m5 = rotMatrixGM[5].toDouble()
+                            val accWorldX_gm = m0*laXd + m1*laYd + m2*laZd // East
+                            val accWorldY_gm = m3*laXd + m4*laYd + m5*laZd // North
                             latestP_gm = accWorldX_gm * dirFx + accWorldY_gm * dirFy
                         }
 
                         if (haveRV) {
-                            val accWorldX_rv = rotMatrixRV[0]*laX + rotMatrixRV[1]*laY + rotMatrixRV[2]*laZ // East
-                            val accWorldY_rv = rotMatrixRV[3]*laX + rotMatrixRV[4]*laY + rotMatrixRV[5]*laZ // North
+                            val r0 = rotMatrixRV[0].toDouble(); val r1 = rotMatrixRV[1].toDouble(); val r2 = rotMatrixRV[2].toDouble()
+                            val r3 = rotMatrixRV[3].toDouble(); val r4 = rotMatrixRV[4].toDouble(); val r5 = rotMatrixRV[5].toDouble()
+                            val accWorldX_rv = r0*laXd + r1*laYd + r2*laZd
+                            val accWorldY_rv = r3*laXd + r4*laYd + r5*laZd
                             latestP_rv = accWorldX_rv * dirFx + accWorldY_rv * dirFy
                         }
 
-                        // ACC-based recomputation (bypasses vendor LA filtering)
+                        // ACC-based recomputation (GM path) + bias diagnostics
                         var accAgeSec = Double.NaN
+                        var gBiasZ: Double? = null
+                        var linWorldX: Double? = null
+                        var linWorldY: Double? = null
                         if (haveGM && latestACC.ts != 0L) {
                             val ax = latestACC.v[0]; val ay = latestACC.v[1]; val az = latestACC.v[2]
+                            val axd = ax.toDouble(); val ayd = ay.toDouble(); val azd = az.toDouble()
                             accAgeSec = ((curr - latestACC.ts).coerceAtLeast(0L)) * 1e-9
-                            val aWorldX = rotMatrixGM[0]*ax + rotMatrixGM[1]*ay + rotMatrixGM[2]*az
-                            val aWorldY = rotMatrixGM[3]*ax + rotMatrixGM[4]*ay + rotMatrixGM[5]*az
-                            val aWorldZ = rotMatrixGM[6]*ax + rotMatrixGM[7]*ay + rotMatrixGM[8]*az
+
+                            val m0 = rotMatrixGM[0].toDouble(); val m1 = rotMatrixGM[1].toDouble(); val m2 = rotMatrixGM[2].toDouble()
+                            val m3 = rotMatrixGM[3].toDouble(); val m4 = rotMatrixGM[4].toDouble(); val m5 = rotMatrixGM[5].toDouble()
+                            val m6 = rotMatrixGM[6].toDouble(); val m7 = rotMatrixGM[7].toDouble(); val m8 = rotMatrixGM[8].toDouble()
+
+                            val aWorldX = m0*axd + m1*ayd + m2*azd
+                            val aWorldY = m3*axd + m4*ayd + m5*azd
+                            val aWorldZ = m6*axd + m7*ayd + m8*azd
+
                             // Remove gravity in world frame
-                            val linWorldX = aWorldX
-                            val linWorldY = aWorldY
-                            val linWorldZ = aWorldZ - SensorManager.STANDARD_GRAVITY
-                            // Project onto heading (XY only)
-                            latestP_accGM = linWorldX * dirFx + linWorldY * dirFy
-                            // (linWorldZ not used for P; logged path is horizontal P)
+                            val linWorldZ = aWorldZ - SensorManager.STANDARD_GRAVITY.toDouble()
+                            // Horizontal linear accel we use for P_accGM projection (XY only)
+                            linWorldX = aWorldX
+                            linWorldY = aWorldY
+
+                            latestP_accGM = (linWorldX * dirFx) + (linWorldY * dirFy)
+                            gBiasZ = linWorldZ
                         }
 
                         // ===== Integrate to V =====
@@ -310,6 +363,22 @@ class SensorLoggerService : Service(), SensorEventListener {
                             if (!latestP_accGM.isNaN()) vAccum_accGM += dtSec * latestP_accGM
                         }
 
+                        // ===== Quiet-tail updates (bias means) =====
+                        // Use LA norm + small |P_gm| as a quiet detector
+                        if (haveGM) {
+                            val laNorm = sqrt(laXd*laXd + laYd*laYd + laZd*laZd)
+                            val isQuiet = (abs(latestP_gm) <= QUIET_P_ABS_MAX) && (laNorm <= QUIET_LA_NORM_MAX)
+                            if (isQuiet) {
+                                gBiasZ?.let { tailMean_gBiasZ.push(it) }
+                                linWorldX?.let { tailMean_linX.push(it) }
+                                linWorldY?.let { tailMean_linY.push(it) }
+                            }
+                        }
+
+                        val gBiasZMean = tailMean_gBiasZ.meanOrNull()
+                        val linBiasXMean = tailMean_linX.meanOrNull()
+                        val linBiasYMean = tailMean_linY.meanOrNull()
+
                         // ---- LA CSV line ----
                         runCatching {
                             val w = getWriter(sensorType) ?: return@runCatching
@@ -318,40 +387,50 @@ class SensorLoggerService : Service(), SensorEventListener {
                                 append(prevForLine); append(",")
                                 append(curr); append(",")
                                 append(String.format(Locale.US, "%.6f", laClockSec)); append(",")
-                                append(String.format(Locale.US, "%.6f", laX)); append(",")
-                                append(String.format(Locale.US, "%.6f", laY)); append(",")
-                                append(String.format(Locale.US, "%.6f", laZ)); append(",")
+                                append(String.format(Locale.US, "%.6f", laXf)); append(",")
+                                append(String.format(Locale.US, "%.6f", laYf)); append(",")
+                                append(String.format(Locale.US, "%.6f", laZf)); append(",")
 
-                                // Primary P,V (GM) to keep compatibility with earlier analyses
+                                // Primary P,V (GM)
                                 if (haveGM) append(String.format(Locale.US, "%.5f", latestP_gm)) else append("")
                                 append(",")
                                 if (haveGM) append(String.format(Locale.US, "%.6f", vAccum_gm)) else append("")
-                                // === Diagnostics ===
+
+                                // GM orientation diag
                                 append(",")
-                                // oriAgeGM, yawGMdeg
                                 if (haveGM) append(String.format(Locale.US, "%.4f", oriAgeGM)) else append("")
                                 append(",")
                                 if (haveGM) append(String.format(Locale.US, "%.1f", yawGMdeg)) else append("")
 
+                                // RV P,V + diag
                                 append(",")
-                                // P_rv, V_rv
                                 if (haveRV) append(String.format(Locale.US, "%.5f", latestP_rv)) else append("")
                                 append(",")
                                 if (haveRV) append(String.format(Locale.US, "%.6f", vAccum_rv)) else append("")
-
                                 append(",")
-                                // oriAgeRV, yawRVdeg
                                 if (haveRV) append(String.format(Locale.US, "%.4f", oriAgeRV)) else append("")
                                 append(",")
                                 if (haveRV) append(String.format(Locale.US, "%.1f", yawRVdeg)) else append("")
 
+                                // ACC->world(GM) projected P & V + acc age
                                 append(",")
-                                // P_accGM, V_accGM, accAgeSec
                                 if (!latestP_accGM.isNaN()) append(String.format(Locale.US, "%.5f", latestP_accGM)) else append("")
                                 append(",")
-                                if (!vAccum_accGM.isNaN()) append(String.format(Locale.US, "%.6f", vAccum_accGM)) else append("")
+                                append(String.format(Locale.US, "%.6f", vAccum_accGM))
                                 append(",")
                                 if (!accAgeSec.isNaN()) append(String.format(Locale.US, "%.4f", accAgeSec)) else append("")
+
+                                // gBiasZ (inst) and tail mean
+                                append(",")
+                                if (gBiasZ != null) append(String.format(Locale.US, "%.5f", gBiasZ)) else append("")
+                                append(",")
+                                if (gBiasZMean != null) append(String.format(Locale.US, "%.5f", gBiasZMean)) else append("")
+
+                                // Horizontal bias tail means (ACC->world X/Y, GM path)
+                                append(",")
+                                if (linBiasXMean != null) append(String.format(Locale.US, "%.5f", linBiasXMean)) else append("")
+                                append(",")
+                                if (linBiasYMean != null) append(String.format(Locale.US, "%.5f", linBiasYMean)) else append("")
 
                                 append("\n")
                             }
@@ -367,22 +446,19 @@ class SensorLoggerService : Service(), SensorEventListener {
                         writeSimple(sensorType, sensorTsNs, values)
                     }
                     Sensor.TYPE_GRAVITY -> {
-                        // (already copied above)
                         writeSimple(sensorType, sensorTsNs, values)
                     }
                     Sensor.TYPE_MAGNETIC_FIELD -> {
-                        // (already copied above)
                         writeSimple(sensorType, sensorTsNs, values)
                     }
                     Sensor.TYPE_ROTATION_VECTOR -> {
-                        // Also log the raw rotation vector for reference (optional)
                         writeSimple(sensorType, sensorTsNs, values)
                     }
                 }
 
                 if (!isLogging || !writersOpen) return@synchronized
 
-                // ---- Combined snapshot CSV remains as before ----
+                // ---- Combined snapshot CSV ----
                 runCatching {
                     val cw = getCombinedWriter() ?: return@runCatching
                     val line = buildString {
@@ -452,10 +528,10 @@ class SensorLoggerService : Service(), SensorEventListener {
             val writer = FileWriter(file, true)
             if (file.length() == 0L) {
                 val header = when (sensorType) {
-                    // LA CSV: primary (GM) + diagnostics
-                    // prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg,P_rv,V_rv,oriAgeRV,yawRVdeg,P_accGM,V_accGM,accAgeSec
+                    // LA CSV header:
+                    // prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg,P_rv,V_rv,oriAgeRV,yawRVdeg,P_accGM,V_accGM,accAgeSec,gBiasZ,gBiasZ_tailMean,linBiasX_tailMean,linBiasY_tailMean
                     Sensor.TYPE_LINEAR_ACCELERATION ->
-                        "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg,P_rv,V_rv,oriAgeRV,yawRVdeg,P_accGM,V_accGM,accAgeSec\n"
+                        "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg,P_rv,V_rv,oriAgeRV,yawRVdeg,P_accGM,V_accGM,accAgeSec,gBiasZ,gBiasZ_tailMean,linBiasX_tailMean,linBiasY_tailMean\n"
                     else ->
                         "timestamp,val0,val1,val2\n"
                 }
