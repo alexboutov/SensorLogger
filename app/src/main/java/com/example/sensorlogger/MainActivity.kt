@@ -8,7 +8,6 @@ import com.example.sensorlogger.databinding.ActivityMainBinding
 
 private const val PREFS_NAME = "sensor_logger_prefs"
 private const val PREF_AZIMUTH = "azimuth_deg"
-const val EXTRA_AZIMUTH_DEG = "com.example.sensorlogger.EXTRA_AZIMUTH_DEG"
 
 class MainActivity : AppCompatActivity() {
 
@@ -51,9 +50,9 @@ class MainActivity : AppCompatActivity() {
                 } ?: 0.0
 
                 val intent = Intent(this, SensorLoggerService::class.java).apply {
-                    putExtra(EXTRA_AZIMUTH_DEG, azimuthDeg)
+                    // Use the service’s constant to avoid key drift
+                    putExtra(SensorLoggerService.EXTRA_AZIMUTH_DEG, azimuthDeg)
                 }
-                // Use the same start call you already use
                 startService(intent)
 
                 isLogging = true

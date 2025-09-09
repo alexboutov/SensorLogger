@@ -26,6 +26,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.Date
 import java.util.concurrent.Executors
+import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -69,14 +70,14 @@ class SensorLoggerService : Service(), SensorEventListener {
     private var dirFx: Double = 0.0   // East component = sin(az)
     private var dirFy: Double = 1.0   // North component = cos(az)
 
-    // P components and accumulators
+    // P components and accumulators (raw)
     private var latestP_gm: Double = 0.0
     private var latestP_rv: Double = 0.0
     private var latestP_accGM: Double = 0.0
 
-    private var vAccum_gm: Double = 0.0     // integrates P_gm
-    private var vAccum_rv: Double = 0.0     // integrates P_rv
-    private var vAccum_accGM: Double = 0.0  // integrates P_accGM
+    private var vAccum_gm: Double = 0.0     // integrates raw P_gm
+    private var vAccum_rv: Double = 0.0     // integrates raw P_rv
+    private var vAccum_accGM: Double = 0.0  // integrates raw P_accGM
 
     /** ===== Concurrency & lifecycle guards ===== */
     private val ioErrorHandler = CoroutineExceptionHandler { _, e ->
@@ -96,8 +97,95 @@ class SensorLoggerService : Service(), SensorEventListener {
     private var prevLaTsNs: Long = 0L           // last raw sensor ns
     private var laClockSec: Double = 0.0        // accumulated SECONDS since START
 
+    // For LA jump/jerk diagnostics
+    private val prevLaVec = FloatArray(3) { 0f }
+    private var hasPrevLa = false
+
     // Simple lock for consistency (used inside single-thread too for clarity)
     private val lock = Any()
+
+    // ======== Diagnostic thresholds (tunable, no behavior change) ========
+    private val ORI_STALE_SEC = 0.040            // 40 ms
+    private val ACC_STALE_SEC = 0.040            // 40 ms
+    private val LA_MAG_SAT = 25.0                // m/s^2 (LA magnitude too large)
+    private val LA_JUMP_THRESH = 5.0             // m/s^2 (per-sample jump magnitude)
+    private val P_OUTLIER_THRESH = 10.0          // m/s^2 along heading (implausible for human-scale motion)
+    private val GRAV_NORM = SensorManager.STANDARD_GRAVITY.toDouble() // ~9.80665
+    private val GRAV_TOL = 1.5                   // m/s^2 tolerance
+    private val MAG_MIN_UT = 20.0                // microTesla lower bound
+    private val MAG_MAX_UT = 70.0                // microTesla upper bound
+
+    // ======== Centered moving average of P (diagnostic only) ========
+    private val N_SMOOTH = 20
+    private val WINDOW_SIZE = 2 * N_SMOOTH + 1
+
+    // We need value buffers + aligned row buffers per pipe
+    private val bufPgmVals = ArrayDeque<Double>()
+    private val bufPgmRows = ArrayDeque<LaRow>()
+    private val bufPrvVals = ArrayDeque<Double>()
+    private val bufPrvRows = ArrayDeque<LaRow>()
+    private val bufPaccVals = ArrayDeque<Double>()
+    private val bufPaccRows = ArrayDeque<LaRow>()
+
+    // Smoothed integration accumulators per pipe
+    private var vSmAccum_gm = 0.0
+    private var vSmAccum_rv = 0.0
+    private var vSmAccum_accGM = 0.0
+    private var sSmAccum_gm = 0.0
+    private var sSmAccum_rv = 0.0
+    private var sSmAccum_accGM = 0.0
+    private var lastSmaTsNs_gm = 0L
+    private var lastSmaTsNs_rv = 0L
+    private var lastSmaTsNs_accGM = 0L
+
+    // We buffer pending LA rows so we can fill smoothed P/velocity/distance for the centered row
+    private data class LaRow(
+        val prevLaTsNs: Long,
+        val laTsNs: Long,
+        val laClockSec: Double,
+        val laX: Float, val laY: Float, val laZ: Float,
+        val azimuthDeg: Double,
+        // Raw P/V
+        val haveGM: Boolean,
+        val p_gm: Double,
+        val v_gm: Double,
+        val oriAgeGM: Double?,
+        val yawGMdeg: Double?,
+        val haveRV: Boolean,
+        val p_rv: Double,
+        val v_rv: Double,
+        val oriAgeRV: Double?,
+        val yawRVdeg: Double?,
+        val p_accGM: Double?,
+        val v_accGM: Double?,
+        val accAgeSec: Double?,
+
+        // Smoothed P (centered SMA)
+        var p_gm_smooth: Double? = null,
+        var p_rv_smooth: Double? = null,
+        var p_accGM_smooth: Double? = null,
+
+        // Smoothed velocity and distance (displacement along heading)
+        var v_gm_smooth: Double? = null,
+        var s_gm_smooth: Double? = null,
+        var v_rv_smooth: Double? = null,
+        var s_rv_smooth: Double? = null,
+        var v_accGM_smooth: Double? = null,
+        var s_accGM_smooth: Double? = null,
+
+        // Flags
+        val flagOriStaleGM: Boolean?,
+        val flagOriStaleRV: Boolean?,
+        val flagAccStale: Boolean?,
+        val flagLaSat: Boolean,
+        val flagLaJump: Boolean,
+        val flagPgmOut: Boolean?,
+        val flagPrvOut: Boolean?,
+        val flagGravAnom: Boolean?,
+        val flagMagAnom: Boolean?
+    )
+
+    private val pendingRows: ArrayDeque<LaRow> = ArrayDeque()
 
     override fun onCreate() {
         super.onCreate()
@@ -114,10 +202,18 @@ class SensorLoggerService : Service(), SensorEventListener {
         writersOpen = true
 
         // Read azimuth from UI and precompute direction vector (X=East, Y=North)
-        azimuthDeg = intent?.getDoubleExtra(EXTRA_AZIMUTH_DEG, 0.0) ?: 0.0
+        // Accept both the canonical key (this constant) and the legacy fully-qualified key, just in case.
+        azimuthDeg = when {
+            intent?.hasExtra(EXTRA_AZIMUTH_DEG) == true ->
+                intent.getDoubleExtra(EXTRA_AZIMUTH_DEG, 0.0)
+            intent?.hasExtra("com.example.sensorlogger.EXTRA_AZIMUTH_DEG") == true ->
+                intent.getDoubleExtra("com.example.sensorlogger.EXTRA_AZIMUTH_DEG", 0.0)
+            else -> 0.0
+        }
         val azRad = Math.toRadians(azimuthDeg)
         dirFx = sin(azRad) // East
         dirFy = cos(azRad) // North
+        android.util.Log.d("SensorLogger", "UI azimuthDeg=$azimuthDeg°  dirFx=$dirFx dirFy=$dirFy")
 
         // Reset integrators/clocks
         vAccum_gm = 0.0
@@ -126,6 +222,19 @@ class SensorLoggerService : Service(), SensorEventListener {
         prevLaTsNs = 0L
         laClockSec = 0.0
 
+        // Reset LA jump state
+        hasPrevLa = false
+        prevLaVec[0] = 0f; prevLaVec[1] = 0f; prevLaVec[2] = 0f
+
+        // Clear smoothing buffers/rows
+        bufPgmVals.clear(); bufPgmRows.clear()
+        bufPrvVals.clear(); bufPrvRows.clear()
+        bufPaccVals.clear(); bufPaccRows.clear()
+        vSmAccum_gm = 0.0; vSmAccum_rv = 0.0; vSmAccum_accGM = 0.0
+        sSmAccum_gm = 0.0; sSmAccum_rv = 0.0; sSmAccum_accGM = 0.0
+        lastSmaTsNs_gm = 0L; lastSmaTsNs_rv = 0L; lastSmaTsNs_accGM = 0L
+        pendingRows.clear()
+
         registerSensors()
         return START_STICKY
     }
@@ -133,6 +242,14 @@ class SensorLoggerService : Service(), SensorEventListener {
     override fun onDestroy() {
         isLogging = false
         unregisterSensors()
+
+        // Flush any remaining pending rows (tail will have blank smoothed values where unavailable)
+        synchronized(lock) {
+            while (pendingRows.isNotEmpty()) {
+                writeLaRow(pendingRows.removeFirst())
+            }
+        }
+
         serviceJob.cancelChildren()
         closeWriters()
         writersOpen = false
@@ -242,6 +359,25 @@ class SensorLoggerService : Service(), SensorEventListener {
                         System.arraycopy(values, 0, latestLA.v, 0, 3)
                         val laX = values[0]; val laY = values[1]; val laZ = values[2]
 
+                        // ===== Magnitudes / norms for diagnostics =====
+                        val laMag = sqrt((laX * laX + laY * laY + laZ * laZ).toDouble())
+                        val gravMag = if (hasGravity) sqrt(
+                            (gravity[0] * gravity[0] + gravity[1] * gravity[1] + gravity[2] * gravity[2]).toDouble()
+                        ) else Double.NaN
+                        val magMagUt = if (hasMagnetic) sqrt(
+                            (magnetic[0] * magnetic[0] + magnetic[1] * magnetic[1] + magnetic[2] * magnetic[2]).toDouble()
+                        ) else Double.NaN
+
+                        // LA jump (jerk-like) per-sample
+                        val laJumpMag = if (hasPrevLa) {
+                            val dx = laX - prevLaVec[0]
+                            val dy = laY - prevLaVec[1]
+                            val dz = laZ - prevLaVec[2]
+                            sqrt((dx * dx + dy * dy + dz * dz).toDouble())
+                        } else 0.0
+                        prevLaVec[0] = laX; prevLaVec[1] = laY; prevLaVec[2] = laZ
+                        hasPrevLa = true
+
                         // Prepare orientation(s)
                         var haveGM = false
                         var yawGMdeg = Double.NaN
@@ -269,20 +405,22 @@ class SensorLoggerService : Service(), SensorEventListener {
                         }
 
                         // ----- Compute P along UI heading using different pipelines -----
-                        // (World frame: X=East, Y=North)
+                        // (World frame: X=East, Y=North). Rotate device LA into world, then project onto (dirFx, dirFy).
                         latestP_gm = 0.0
                         latestP_rv = 0.0
                         latestP_accGM = 0.0
 
                         if (haveGM) {
-                            val accWorldX_gm = rotMatrixGM[0]*laX + rotMatrixGM[1]*laY + rotMatrixGM[2]*laZ // East
-                            val accWorldY_gm = rotMatrixGM[3]*laX + rotMatrixGM[4]*laY + rotMatrixGM[5]*laZ // North
+                            // GM -> world (use R^T)
+                            val accWorldX_gm = rotMatrixGM[0]*laX + rotMatrixGM[3]*laY + rotMatrixGM[6]*laZ
+                            val accWorldY_gm = rotMatrixGM[1]*laX + rotMatrixGM[4]*laY + rotMatrixGM[7]*laZ
                             latestP_gm = accWorldX_gm * dirFx + accWorldY_gm * dirFy
                         }
 
                         if (haveRV) {
-                            val accWorldX_rv = rotMatrixRV[0]*laX + rotMatrixRV[1]*laY + rotMatrixRV[2]*laZ // East
-                            val accWorldY_rv = rotMatrixRV[3]*laX + rotMatrixRV[4]*laY + rotMatrixRV[5]*laZ // North
+                            // RV -> world (use R^T)
+                            val accWorldX_rv = rotMatrixRV[0]*laX + rotMatrixRV[3]*laY + rotMatrixRV[6]*laZ
+                            val accWorldY_rv = rotMatrixRV[1]*laX + rotMatrixRV[4]*laY + rotMatrixRV[7]*laZ
                             latestP_rv = accWorldX_rv * dirFx + accWorldY_rv * dirFy
                         }
 
@@ -300,64 +438,136 @@ class SensorLoggerService : Service(), SensorEventListener {
                             val linWorldZ = aWorldZ - SensorManager.STANDARD_GRAVITY
                             // Project onto heading (XY only)
                             latestP_accGM = linWorldX * dirFx + linWorldY * dirFy
-                            // (linWorldZ not used for P; logged path is horizontal P)
+                            // (linWorldZ not used for P)
                         }
 
-                        // ===== Integrate to V =====
+
+                        // ===== Integrate to V (RAW P ONLY) =====
                         if (prevForLine != 0L) {
                             if (haveGM) vAccum_gm += dtSec * latestP_gm
                             if (haveRV) vAccum_rv += dtSec * latestP_rv
                             if (!latestP_accGM.isNaN()) vAccum_accGM += dtSec * latestP_accGM
                         }
 
-                        // ---- LA CSV line ----
-                        runCatching {
-                            val w = getWriter(sensorType) ?: return@runCatching
-                            val line = buildString {
-                                // Core timing & LA
-                                append(prevForLine); append(",")
-                                append(curr); append(",")
-                                append(String.format(Locale.US, "%.6f", laClockSec)); append(",")
-                                append(String.format(Locale.US, "%.6f", laX)); append(",")
-                                append(String.format(Locale.US, "%.6f", laY)); append(",")
-                                append(String.format(Locale.US, "%.6f", laZ)); append(",")
+                        // ======== Build diagnostic flags (no behavior change) ========
+                        val flagOriStaleGM = if (haveGM && !oriAgeGM.isNaN()) (oriAgeGM > ORI_STALE_SEC) else null
+                        val flagOriStaleRV = if (haveRV && !oriAgeRV.isNaN()) (oriAgeRV > ORI_STALE_SEC) else null
+                        val flagAccStale   = if (!accAgeSec.isNaN()) (accAgeSec > ACC_STALE_SEC) else null
 
-                                // Primary P,V (GM) to keep compatibility with earlier analyses
-                                if (haveGM) append(String.format(Locale.US, "%.5f", latestP_gm)) else append("")
-                                append(",")
-                                if (haveGM) append(String.format(Locale.US, "%.6f", vAccum_gm)) else append("")
-                                // === Diagnostics ===
-                                append(",")
-                                // oriAgeGM, yawGMdeg
-                                if (haveGM) append(String.format(Locale.US, "%.4f", oriAgeGM)) else append("")
-                                append(",")
-                                if (haveGM) append(String.format(Locale.US, "%.1f", yawGMdeg)) else append("")
+                        val flagLaSat  = laMag > LA_MAG_SAT
+                        val flagLaJump = hasPrevLa && laJumpMag > LA_JUMP_THRESH
 
-                                append(",")
-                                // P_rv, V_rv
-                                if (haveRV) append(String.format(Locale.US, "%.5f", latestP_rv)) else append("")
-                                append(",")
-                                if (haveRV) append(String.format(Locale.US, "%.6f", vAccum_rv)) else append("")
+                        val flagPgmOut = if (haveGM) (abs(latestP_gm) > P_OUTLIER_THRESH) else null
+                        val flagPrvOut = if (haveRV) (abs(latestP_rv) > P_OUTLIER_THRESH) else null
 
-                                append(",")
-                                // oriAgeRV, yawRVdeg
-                                if (haveRV) append(String.format(Locale.US, "%.4f", oriAgeRV)) else append("")
-                                append(",")
-                                if (haveRV) append(String.format(Locale.US, "%.1f", yawRVdeg)) else append("")
+                        val flagGravAnom = if (hasGravity) (abs(gravMag - GRAV_NORM) > GRAV_TOL) else null
+                        val flagMagAnom  = if (hasMagnetic) (magMagUt < MAG_MIN_UT || magMagUt > MAG_MAX_UT) else null
 
-                                append(",")
-                                // P_accGM, V_accGM, accAgeSec
-                                if (!latestP_accGM.isNaN()) append(String.format(Locale.US, "%.5f", latestP_accGM)) else append("")
-                                append(",")
-                                if (!vAccum_accGM.isNaN()) append(String.format(Locale.US, "%.6f", vAccum_accGM)) else append("")
-                                append(",")
-                                if (!accAgeSec.isNaN()) append(String.format(Locale.US, "%.4f", accAgeSec)) else append("")
+                        // ======== Build row object ========
+                        val row = LaRow(
+                            prevLaTsNs = prevForLine,
+                            laTsNs = curr,
+                            laClockSec = laClockSec,
+                            laX = laX, laY = laY, laZ = laZ,
+                            azimuthDeg = azimuthDeg,
+                            haveGM = haveGM,
+                            p_gm = latestP_gm,
+                            v_gm = vAccum_gm,
+                            oriAgeGM = if (haveGM) oriAgeGM else null,
+                            yawGMdeg = if (haveGM) yawGMdeg else null,
+                            haveRV = haveRV,
+                            p_rv = latestP_rv,
+                            v_rv = vAccum_rv,
+                            oriAgeRV = if (haveRV) oriAgeRV else null,
+                            yawRVdeg = if (haveRV) yawRVdeg else null,
+                            p_accGM = if (!latestP_accGM.isNaN()) latestP_accGM else null,
+                            v_accGM = if (!vAccum_accGM.isNaN()) vAccum_accGM else null,
+                            accAgeSec = if (!accAgeSec.isNaN()) accAgeSec else null,
+                            // smoothed fields (to be filled)
+                            p_gm_smooth = null, p_rv_smooth = null, p_accGM_smooth = null,
+                            v_gm_smooth = null, s_gm_smooth = null,
+                            v_rv_smooth = null, s_rv_smooth = null,
+                            v_accGM_smooth = null, s_accGM_smooth = null,
+                            // flags
+                            flagOriStaleGM = flagOriStaleGM,
+                            flagOriStaleRV = flagOriStaleRV,
+                            flagAccStale = flagAccStale,
+                            flagLaSat = flagLaSat,
+                            flagLaJump = flagLaJump,
+                            flagPgmOut = flagPgmOut,
+                            flagPrvOut = flagPrvOut,
+                            flagGravAnom = flagGravAnom,
+                            flagMagAnom = flagMagAnom
+                        )
+                        pendingRows.addLast(row)
 
-                                append("\n")
+                        // ======== Update P buffers per pipe (value + aligned row refs) ========
+                        if (haveGM) {
+                            bufPgmVals.addLast(latestP_gm); bufPgmRows.addLast(row)
+                            if (bufPgmVals.size > WINDOW_SIZE) { bufPgmVals.removeFirst(); bufPgmRows.removeFirst() }
+                        }
+                        if (haveRV) {
+                            bufPrvVals.addLast(latestP_rv); bufPrvRows.addLast(row)
+                            if (bufPrvVals.size > WINDOW_SIZE) { bufPrvVals.removeFirst(); bufPrvRows.removeFirst() }
+                        }
+                        if (row.p_accGM != null) {
+                            bufPaccVals.addLast(latestP_accGM); bufPaccRows.addLast(row)
+                            if (bufPaccVals.size > WINDOW_SIZE) { bufPaccVals.removeFirst(); bufPaccRows.removeFirst() }
+                        }
+
+                        // ======== If any pipe has a full window, compute centered SMA and smoothed V/S ========
+                        if (bufPgmVals.size == WINDOW_SIZE) {
+                            val centerRow = dequeNth(bufPgmRows, N_SMOOTH)
+                            if (centerRow != null) {
+                                val psm = averageDeque(bufPgmVals)
+                                centerRow.p_gm_smooth = psm
+                                val ts = centerRow.laTsNs
+                                if (lastSmaTsNs_gm != 0L) {
+                                    val dt = ((ts - lastSmaTsNs_gm).coerceAtLeast(0L)).toDouble() * 1e-9
+                                    vSmAccum_gm += dt * psm
+                                    sSmAccum_gm += dt * vSmAccum_gm
+                                }
+                                lastSmaTsNs_gm = ts
+                                centerRow.v_gm_smooth = vSmAccum_gm
+                                centerRow.s_gm_smooth = sSmAccum_gm
                             }
-                            w.write(line); w.flush()
-                        }.onFailure {
-                            if (isLogging) android.util.Log.e("SensorLogger", "LA write failed", it)
+                        }
+                        if (bufPrvVals.size == WINDOW_SIZE) {
+                            val centerRow = dequeNth(bufPrvRows, N_SMOOTH)
+                            if (centerRow != null) {
+                                val psm = averageDeque(bufPrvVals)
+                                centerRow.p_rv_smooth = psm
+                                val ts = centerRow.laTsNs
+                                if (lastSmaTsNs_rv != 0L) {
+                                    val dt = ((ts - lastSmaTsNs_rv).coerceAtLeast(0L)).toDouble() * 1e-9
+                                    vSmAccum_rv += dt * psm
+                                    sSmAccum_rv += dt * vSmAccum_rv
+                                }
+                                lastSmaTsNs_rv = ts
+                                centerRow.v_rv_smooth = vSmAccum_rv
+                                centerRow.s_rv_smooth = sSmAccum_rv
+                            }
+                        }
+                        if (bufPaccVals.size == WINDOW_SIZE) {
+                            val centerRow = dequeNth(bufPaccRows, N_SMOOTH)
+                            if (centerRow != null) {
+                                val psm = averageDeque(bufPaccVals)
+                                centerRow.p_accGM_smooth = psm
+                                val ts = centerRow.laTsNs
+                                if (lastSmaTsNs_accGM != 0L) {
+                                    val dt = ((ts - lastSmaTsNs_accGM).coerceAtLeast(0L)).toDouble() * 1e-9
+                                    vSmAccum_accGM += dt * psm
+                                    sSmAccum_accGM += dt * vSmAccum_accGM
+                                }
+                                lastSmaTsNs_accGM = ts
+                                centerRow.v_accGM_smooth = vSmAccum_accGM
+                                centerRow.s_accGM_smooth = sSmAccum_accGM
+                            }
+                        }
+
+                        // Emit rows while we have more than N_SMOOTH pending
+                        while (pendingRows.size > N_SMOOTH) {
+                            writeLaRow(pendingRows.removeFirst())
                         }
                     }
 
@@ -367,15 +577,12 @@ class SensorLoggerService : Service(), SensorEventListener {
                         writeSimple(sensorType, sensorTsNs, values)
                     }
                     Sensor.TYPE_GRAVITY -> {
-                        // (already copied above)
                         writeSimple(sensorType, sensorTsNs, values)
                     }
                     Sensor.TYPE_MAGNETIC_FIELD -> {
-                        // (already copied above)
                         writeSimple(sensorType, sensorTsNs, values)
                     }
                     Sensor.TYPE_ROTATION_VECTOR -> {
-                        // Also log the raw rotation vector for reference (optional)
                         writeSimple(sensorType, sensorTsNs, values)
                     }
                 }
@@ -418,6 +625,113 @@ class SensorLoggerService : Service(), SensorEventListener {
         }
     }
 
+    private fun <T> dequeNth(dq: ArrayDeque<T>, index: Int): T? {
+        if (index < 0 || index >= dq.size) return null
+        var i = 0
+        for (e in dq) {
+            if (i == index) return e
+            i++
+        }
+        return null
+    }
+
+    private fun averageDeque(dq: ArrayDeque<Double>): Double {
+        var sum = 0.0
+        for (v in dq) sum += v
+        return sum / dq.size
+    }
+
+    private fun writeLaRow(r: LaRow) {
+        runCatching {
+            val w = getWriter(Sensor.TYPE_LINEAR_ACCELERATION) ?: return@runCatching
+            val line = buildString {
+                // Core timing & LA
+                append(r.prevLaTsNs); append(",")
+                append(r.laTsNs); append(",")
+                append(String.format(Locale.US, "%.6f", r.laClockSec)); append(",")
+                append(String.format(Locale.US, "%.6f", r.laX)); append(",")
+                append(String.format(Locale.US, "%.6f", r.laY)); append(",")
+                append(String.format(Locale.US, "%.6f", r.laZ)); append(",")
+
+                // Azimuth (deg) from UI
+                append(String.format(Locale.US, "%.3f", r.azimuthDeg)); append(",")
+
+                // Primary P,V (GM)
+                if (r.haveGM) append(String.format(Locale.US, "%.5f", r.p_gm)) else append("")
+                append(",")
+                if (r.haveGM) append(String.format(Locale.US, "%.6f", r.v_gm)) else append("")
+
+                append(",")
+                // oriAgeGM, yawGMdeg
+                if (r.haveGM && r.oriAgeGM != null) append(String.format(Locale.US, "%.4f", r.oriAgeGM)) else append("")
+                append(",")
+                if (r.haveGM && r.yawGMdeg != null) append(String.format(Locale.US, "%.1f", r.yawGMdeg)) else append("")
+
+                append(",")
+                // P_rv, V_rv
+                if (r.haveRV) append(String.format(Locale.US, "%.5f", r.p_rv)) else append("")
+                append(",")
+                if (r.haveRV) append(String.format(Locale.US, "%.6f", r.v_rv)) else append("")
+
+                append(",")
+                // oriAgeRV, yawRVdeg
+                if (r.haveRV && r.oriAgeRV != null) append(String.format(Locale.US, "%.4f", r.oriAgeRV)) else append("")
+                append(",")
+                if (r.haveRV && r.yawRVdeg != null) append(String.format(Locale.US, "%.1f", r.yawRVdeg)) else append("")
+
+                append(",")
+                // P_accGM, V_accGM, accAgeSec
+                if (r.p_accGM != null) append(String.format(Locale.US, "%.5f", r.p_accGM)) else append("")
+                append(",")
+                if (r.v_accGM != null) append(String.format(Locale.US, "%.6f", r.v_accGM)) else append("")
+                append(",")
+                if (r.accAgeSec != null) append(String.format(Locale.US, "%.4f", r.accAgeSec)) else append("")
+
+                // ===== Smoothed P (centered SMA) =====
+                append(",")
+                if (r.p_gm_smooth != null) append(String.format(Locale.US, "%.5f", r.p_gm_smooth)) else append("")
+                append(",")
+                if (r.p_rv_smooth != null) append(String.format(Locale.US, "%.5f", r.p_rv_smooth)) else append("")
+                append(",")
+                if (r.p_accGM_smooth != null) append(String.format(Locale.US, "%.5f", r.p_accGM_smooth)) else append("")
+
+                // ===== Smoothed Velocity and Distance (displacement) =====
+                append(",")
+                if (r.v_gm_smooth != null) append(String.format(Locale.US, "%.6f", r.v_gm_smooth)) else append("")
+                append(",")
+                if (r.s_gm_smooth != null) append(String.format(Locale.US, "%.6f", r.s_gm_smooth)) else append("")
+                append(",")
+                if (r.v_rv_smooth != null) append(String.format(Locale.US, "%.6f", r.v_rv_smooth)) else append("")
+                append(",")
+                if (r.s_rv_smooth != null) append(String.format(Locale.US, "%.6f", r.s_rv_smooth)) else append("")
+                append(",")
+                if (r.v_accGM_smooth != null) append(String.format(Locale.US, "%.6f", r.v_accGM_smooth)) else append("")
+                append(",")
+                if (r.s_accGM_smooth != null) append(String.format(Locale.US, "%.6f", r.s_accGM_smooth)) else append("")
+
+                // ===== Flags (0/1), blanks when N/A) =====
+                fun appendFlag(b: Boolean?) {
+                    append(",")
+                    if (b == null) append("") else append(if (b) "1" else "0")
+                }
+
+                appendFlag(r.flagOriStaleGM) // isOriStaleGM
+                appendFlag(r.flagOriStaleRV) // isOriStaleRV
+                appendFlag(r.flagAccStale)   // isAccStale
+                append(","); append(if (r.flagLaSat) "1" else "0")   // isLaSat
+                append(","); append(if (r.flagLaJump) "1" else "0")  // isLaJump
+                appendFlag(r.flagPgmOut)     // isPgmOutlier
+                appendFlag(r.flagPrvOut)     // isPrvOutlier
+                appendFlag(r.flagGravAnom)   // isGravAnom
+                appendFlag(r.flagMagAnom)    // isMagAnom
+                append("\n")
+            }
+            w.write(line); w.flush()
+        }.onFailure {
+            if (isLogging) android.util.Log.e("SensorLogger", "LA write failed", it)
+        }
+    }
+
     private fun writeSimple(sensorType: Int, ts: Long, values: FloatArray) {
         runCatching {
             val w = getWriter(sensorType) ?: return@runCatching
@@ -452,10 +766,16 @@ class SensorLoggerService : Service(), SensorEventListener {
             val writer = FileWriter(file, true)
             if (file.length() == 0L) {
                 val header = when (sensorType) {
-                    // LA CSV: primary (GM) + diagnostics
-                    // prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg,P_rv,V_rv,oriAgeRV,yawRVdeg,P_accGM,V_accGM,accAgeSec
+                    // LA CSV: primary (GM) + diagnostics + smoothed + flags
+                    // prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,Azimuth,P,V,oriAgeGM,yawGMdeg,P_rv,V_rv,oriAgeRV,yawRVdeg,P_accGM,V_accGM,accAgeSec,Pgm_smooth,Prv_smooth,PaccGM_smooth,Vgm_smooth,Sgm_smooth,Vrv_smooth,Srv_smooth,VaccGM_smooth,SaccGM_smooth,isOriStaleGM,isOriStaleRV,isAccStale,isLaSat,isLaJump,isPgmOutlier,isPrvOutlier,isGravAnom,isMagAnom
                     Sensor.TYPE_LINEAR_ACCELERATION ->
-                        "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg,P_rv,V_rv,oriAgeRV,yawRVdeg,P_accGM,V_accGM,accAgeSec\n"
+                        "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,Azimuth," +
+                                "P,V,oriAgeGM,yawGMdeg," +
+                                "P_rv,V_rv,oriAgeRV,yawRVdeg," +
+                                "P_accGM,V_accGM,accAgeSec," +
+                                "Pgm_smooth,Prv_smooth,PaccGM_smooth," +
+                                "Vgm_smooth,Sgm_smooth,Vrv_smooth,Srv_smooth,VaccGM_smooth,SaccGM_smooth," +
+                                "isOriStaleGM,isOriStaleRV,isAccStale,isLaSat,isLaJump,isPgmOutlier,isPrvOutlier,isGravAnom,isMagAnom\n"
                     else ->
                         "timestamp,val0,val1,val2\n"
                 }
@@ -498,6 +818,7 @@ class SensorLoggerService : Service(), SensorEventListener {
     }
 
     companion object {
+        // Canonical key the UI should use
         const val EXTRA_AZIMUTH_DEG = "extra_azimuth_deg"
     }
 }
