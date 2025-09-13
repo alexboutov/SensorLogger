@@ -18,10 +18,11 @@
             android:id="@+id/azimuthEditText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:inputType="numberDecimal"
-            android:maxLines="1"
+            android:inputType="numberDecimal|numberSigned"
             android:imeOptions="actionDone"
-            android:hint="e.g., 90.0" />
+            android:maxLines="1"
+            android:singleLine="true"
+            android:hint="e.g., 306" />
     </com.google.android.material.textfield.TextInputLayout>
 
     <!-- Single START/STOP toggle button -->

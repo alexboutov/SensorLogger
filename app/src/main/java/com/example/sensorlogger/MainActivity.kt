@@ -1,8 +1,10 @@
 package com.example.sensorlogger
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
 import androidx.appcompat.app.AppCompatActivity
 import com.example.sensorlogger.databinding.ActivityMainBinding
 
@@ -22,35 +24,46 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // 1) Restore last saved azimuth
+        // Restore last saved azimuth
         val last = prefs.getString(PREF_AZIMUTH, "0.0") ?: "0.0"
         binding.azimuthEditText.setText(last)
 
         // Initial label for the single button
         updateStartStopLabel()
 
-        // 2) Save when user taps "Done" on the keyboard
-        binding.azimuthEditText.setOnEditorActionListener { _, actionId, _ ->
+        // Save + hide keyboard when user taps "Done"
+        binding.azimuthEditText.setOnEditorActionListener { v, actionId, _ ->
             if (actionId == EditorInfo.IME_ACTION_DONE) {
                 saveAzimuth()
+                v.clearFocus()
+                hideKeyboard()
                 true
-            } else false
+            } else {
+                false
+            }
         }
 
-        // 3) Single START/STOP toggle
+        // Also hide keyboard when focus leaves the field
+        binding.azimuthEditText.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) hideKeyboard()
+        }
+
+        // Single START/STOP toggle
         binding.startStopButton.setOnClickListener {
+            // Always save and hide keyboard on button press
+            saveAzimuth()
+            hideKeyboard()
+            binding.azimuthEditText.clearFocus()
+
             if (!isLogging) {
-                // START: save + normalize + pass to service
-                saveAzimuth()
+                // START: normalize + pass to service
                 val azText = binding.azimuthEditText.text?.toString()?.trim().orEmpty()
                 val azimuthDeg = azText.toDoubleOrNull()?.let { v ->
                     // normalize into [0, 360)
-                    val mod = ((v % 360.0) + 360.0) % 360.0
-                    mod
+                    ((v % 360.0) + 360.0) % 360.0
                 } ?: 0.0
 
                 val intent = Intent(this, SensorLoggerService::class.java).apply {
-                    // Use the service’s constant to avoid key drift
                     putExtra(SensorLoggerService.EXTRA_AZIMUTH_DEG, azimuthDeg)
                 }
                 startService(intent)
@@ -68,7 +81,6 @@ class MainActivity : AppCompatActivity() {
 
     override fun onPause() {
         super.onPause()
-        // 4) Save on lifecycle exit as well
         saveAzimuth()
     }
 
@@ -79,5 +91,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateStartStopLabel() {
         binding.startStopButton.text = if (isLogging) "STOP" else "START"
+    }
+
+    private fun hideKeyboard() {
+        val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+        val view = currentFocus ?: binding.azimuthEditText
+        imm.hideSoftInputFromWindow(view.windowToken, 0)
     }
 }
