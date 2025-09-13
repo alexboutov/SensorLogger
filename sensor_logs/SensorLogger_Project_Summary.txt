@@ -1,181 +1,318 @@
-SensorLogger Project Summary - Context & Decisions Log
-
+SensorLogger Project Summary – Context & Decisions Log
 PROJECT SNAPSHOT
-minSdk=26
-targetSdk=34
-jdk=17
-binding=viewBinding
-dataBinding=false
-compose=false
-material=true
-activityKtx=true
+
+minSdk=26 targetSdk=34 jdk=17
+
+binding=viewBinding dataBinding=false compose=false
+
+material=true activityKtx=true
 
 SESSION REQUESTS
 
 (fill in at start of next session)
 
 CHANGES SINCE LAST SUMMARY
+Orientation, pipelines, and diagnostics
 
-Instrumentation added for orientation-staleness test (E1):
-- LA CSV now logs oriAgeGM and yawGMdeg for each LA row.
-- Header: prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg
-- oriTsNs = max(latestGRAV.ts, latestMAG.ts)
-- oriAgeGM = max(0, laTsNs - oriTsNs) * 1e-9 (seconds)
-- yawGMdeg = degrees(getOrientation(R_gm)[0])
+E1 (done): Instrument orientation staleness (GM).
 
-Behavior unchanged:
-- Same rotation source (R_gm from GRAVITY + MAGNETIC_FIELD)
-- Same projection of LA onto UI heading
-- Same integration on LA clock; only extra columns were added
+LA CSV now logs oriAgeGM and yawGMdeg per row.
 
-Confirmed: azimuth value from UI is used to compute forward direction in world frame:
-- dirFx = sin(radians(azimuthDeg))  // East component
-- dirFy = cos(radians(azimuthDeg))  // North component
+oriTsNs = max(latestGRAV.ts, latestMAG.ts), oriAgeGM = max(0, laTsNs - oriTsNs)*1e-9.
 
-Service stability and ordering (retained from prior summary):
-- STOP: set isLogging=false first, unregister sensors, cancel pending writes, then close writers
-- All writes guarded by isLogging/writersOpen
-- Single-threaded dispatcher ensures FIFO write order
+E2 (added, diagnostic only): Added Rotation Vector (RV) pipeline.
 
-Timing:
-- Linear-acceleration timing uses event.timestamp (monotonic ns)
-- laClockSec is accumulated seconds since START
-- ACC/GRAV/MAG snapshots use their own sensor timestamps
+Logs P_rv, V_rv, oriAgeRV, yawRVdeg.
 
-CSV schemas updated:
-- LA: prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg
-- ACC/GRAV/MAG: timestamp,val0,val1,val2
-- Combined: sysTs plus per-sensor monotonic timestamps and values, and P (GM)
+E3 (added, diagnostic only): Added ACC – g pipeline.
+
+Device frame: linDev = ACC - GRAVITY, then rotate with R? (GM) to world ENU.
+
+Logs P_accGM, V_accGM, accAgeSec.
+
+Correct heading & world transform
+
+Fixed sign/axes for GM/RV: Use R? to map device?world (ENU), then project:
+dirFx = sin(radians(azimuthDeg)) (East), dirFy = cos(radians(azimuthDeg)) (North).
+
+ACC pipeline corrected: compute ACC - gravity in device, then rotate with R? to world before projection.
+
+Smoothing (diagnostic only; no behavior change)
+
+Centered SMA on P for all three pipes (n=20 ? window=41).
+
+Integrated smoothed velocity & distance per pipe:
+Pgm_smooth, Prv_smooth, PaccGM_smooth, Vgm_smooth, Sgm_smooth, Vrv_smooth, Srv_smooth, VaccGM_smooth, SaccGM_smooth.
+
+Data quality flags (diagnostic only)
+
+Staleness: isOriStaleGM, isOriStaleRV, isAccStale (thresholds 40 ms).
+
+LA health: isLaSat (|LA|>25 m/s²), isLaJump (per-sample jump >5 m/s²).
+
+Projection outliers: isPgmOutlier, isPrvOutlier (|P|>10 m/s²).
+
+Environment: isGravAnom (|g|-9.81 >1.5), isMagAnom (|B| outside 20–70 µT).
+
+Post-processing after STOP (file rewrite in-place)
+
+Linear detrend of velocities per pipe: estimate slope/intercept for V, V_rv, V_accGM and smoothed counterparts.
+
+Add detrended velocity columns:
+V_detrend, V_rv_detrend, V_accGM_detrend, Vgm_smooth_detrend, Vrv_smooth_detrend, VaccGM_smooth_detrend.
+
+Append footer rows with #slope and #intercept (high precision).
+
+In-place rewrite of the original LA CSV (no duplicate run_<NEWtime>_*.csv): the app memorizes the LA filename and replaces it via a temp file + rename.
+
+Formatting: most numeric columns now 3 decimals; footer slopes/intercepts remain 9 decimals.
+
+UI improvements
+
+Hides numeric keypad immediately on Done, on focus loss, and on START/STOP.
+
+Removed duplicate <EditText> from layout; single Material TextInputEditText remains.
+
+Azimuth normalized into [0, 360) before passing to service.
+
+Behavior unchanged (primary path)
+
+The reference P/V used for combined CSV and compatibility remains GM (raw) integrated on the LA clock.
+
+All new columns are diagnostic/additive—no gating, no filtering of the primary path.
+
+SERVICE STABILITY & ORDERING
+
+STOP: isLogging=false ? unregister sensors ? cancel writes ? close writers.
+
+All writes guarded by isLogging/writersOpen.
+
+Single-threaded dispatcher ensures FIFO write order.
+
+TIMING
+
+LA timing uses event.timestamp (monotonic ns).
+
+laClockSec = accumulated seconds since START.
+
+ACC/GRAV/MAG/RV use their own sensor timestamps.
+
+CSV SCHEMAS
+LA (runtime columns; 3dp formatting on most numeric fields)
+prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,Azimuth,
+P,V,oriAgeGM,yawGMdeg,
+P_rv,V_rv,oriAgeRV,yawRVdeg,
+P_accGM,V_accGM,accAgeSec,
+Pgm_smooth,Prv_smooth,PaccGM_smooth,
+Vgm_smooth,Sgm_smooth,Vrv_smooth,Srv_smooth,VaccGM_smooth,SaccGM_smooth,
+isOriStaleGM,isOriStaleRV,isAccStale,isLaSat,isLaJump,isPgmOutlier,isPrvOutlier,isGravAnom,isMagAnom
+
+LA (post-processing adds; 3dp; footer 9dp)
+..., V_detrend, V_rv_detrend, V_accGM_detrend, Vgm_smooth_detrend, Vrv_smooth_detrend, VaccGM_smooth_detrend
+#slope,...(6 values, 9dp)
+#intercept,...(6 values, 9dp)
+
+ACC/GRAV/MAG/ROT
+timestamp,val0,val1,val2
+
+Combined snapshot (unchanged)
+sysTs,laTs,laX,laY,laZ,accTs,accX,accY,accZ,gravTs,gravX,gravY,gravZ,magTs,magX,magY,magZ,P
+
+
+P in combined is GM P when available; else 0.
 
 OPEN ISSUES
 
-- Need evidence from E1 to confirm or refute orientation-staleness as primary source of V error
-- Keep other hypotheses queued but do not change behavior until E1 is analyzed
+Validate if orientation staleness is the primary driver of post-motion V offsets across environments.
+
+Compare GM vs RV vs ACC–g pipelines using uncalibrated end-distance error (20 m tests).
+
+Determine robust oriAge thresholds and whether gating helps (E4/E5).
+
+Assess ACC–g consistency indoors and under dynamics.
+
+Consider lightweight online bias prediction (per-run slope/intercept) from early-run features.
 
 DONE TODAY
 
-- Produced single-change plan for E1 (instrument orientation age and yaw)
-- Delivered full replacement code that adds columns without changing behavior
-- Updated project summary to reflect no-ZUPT decision and one-change workflow
+Fixed heading mapping and R? world transform; corrected ACC–g pipeline.
+
+Added RV and ACC–g diagnostic pipelines; centered SMA smoothing + smoothed V/S.
+
+Implemented quality flags and post-processing detrend with in-place CSV rewrite.
+
+Standardized 3-decimal formatting (runtime & detrended columns); high-precision footers.
+
+UI polish: hide keypad on Done/focus loss/START–STOP; removed duplicate input.
 
 ENVIRONMENT SETUP
 
-- JAVA_HOME set to JDK 17 on Windows
-- PATH includes %JAVA_HOME%\bin
-- Android Studio JBR present but Gradle forced to use JDK 17 via org.gradle.java.home
-- If device not detected over USB, try another port (observed fix on SM-G930V)
+JAVA_HOME ? JDK 17 (Windows). PATH includes %JAVA_HOME%\bin.
 
-GRADLE AND BUILD TOOLS
+Android Studio JBR present; Gradle uses JDK 17 via org.gradle.java.home.
 
-- Gradle wrapper: 8.6
-- Kotlin: 1.9.20 (from Gradle -v)
-- org.gradle.java.home=C:\Program Files\Java\jdk-17
-- Repos: google(), mavenCentral()
+If device not detected over USB: try another port (SM-G930V fix observed).
 
-APP AND SDK CONFIGURATION
+GRADLE & BUILD TOOLS
 
-- compileSdk 34
-- defaultConfig: minSdk 26, targetSdk 34
-- Java/Kotlin: Java 17, jvmTarget 17
-- Dependencies (core set):
-  androidx.core:core-ktx:1.12.0
-  androidx.core:core:1.12.0
-  androidx.appcompat:appcompat:1.6.1
-  com.google.android.material:material:1.9.0
-  androidx.constraintlayout:constraintlayout:2.1.4
-  androidx.activity:activity-ktx:1.8.2
-  org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1
-- ViewBinding: ON
-- Data Binding: OFF
-- No Room, Retrofit, or Compose
+Gradle wrapper: 8.6
+
+Kotlin: 1.9.20
+
+org.gradle.java.home=C:\Program Files\Java\jdk-17
+
+Repos: google(), mavenCentral()
+
+APP & SDK CONFIG
+
+compileSdk=34, minSdk=26, targetSdk=34
+
+Java/Kotlin: Java 17, jvmTarget=17
+
+Deps (core):
+
+androidx.core:core-ktx:1.12.0, androidx.core:core:1.12.0
+
+androidx.appcompat:appcompat:1.6.1
+
+com.google.android.material:material:1.9.0
+
+androidx.constraintlayout:constraintlayout:2.1.4
+
+androidx.activity:activity-ktx:1.8.2
+
+org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1
+
+ViewBinding: ON, Data Binding: OFF
+
+No Room, Retrofit, or Compose
 
 ANDROIDMANIFEST
 
-- Removed package attribute (namespace set in Gradle)
-- Uses permission: WAKE_LOCK
+Removed package attribute (namespace in Gradle).
 
-BUILD AND RUN PROGRESS
+Uses permission: WAKE_LOCK.
 
-- App builds and runs; foreground service with wakelock
-- START/STOP toggle works; no crash on STOP
-- CSV files generated with monotonic sensor timestamps
-- With E1 instrumentation, behavior is unchanged; LA CSV has two additional diagnostic columns
+BUILD & RUN PROGRESS
+
+Foreground service with wakelock; starts/stops cleanly.
+
+CSVs generated with monotonic sensor timestamps.
+
+LA CSV now includes diagnostics, smoothing, flags, and post-processed detrends.
+
+File rewrite is in-place (no duplicate timestamped LA CSVs).
 
 PHYSICAL DEVICE TESTING
 
-- Device: Samsung SM-G930V (Android 8.0, API 26)
-- Desk tests show reasonable P sign and direction
-- Post-motion V offset observed in some runs, motivating E1
+Samsung SM-G930V (Android 8.0, API 26).
 
-KEY DECISIONS AND PREFERENCES
+Desk tests: P sign/direction reasonable; sign fixed for GM/RV; ACC–g corrected.
 
-- No ZUPT. Do not mask issues; expose and fix root causes
-- Single-change workflow: make exactly one change, test, analyze, decide, then proceed
-- Keep project minimal and focused (only essential libraries)
-- Before generating a drop-in update for any file, paste the current version first to ensure consistency
+20 m walks (forward/back with static UI azimuth) used to validate heading/sign and drift.
+
+KEY DECISIONS & PREFERENCES
+
+No ZUPT (by design). Expose and fix root causes.
+
+One-change workflow for behavior changes; diagnostics can be layered if they don’t alter reference behavior.
+
+Keep project minimal (only essentials).
+
+Before any drop-in update, paste current file to ensure consistency.
 
 CURRENT BASELINE
 
-- Orientation: R_gm = getRotationMatrix(gravity, magnetic)  (world: X=East, Y=North, Z=Up)
-- Forward heading from UI azimuthDeg:
-  dirFx = sin(radians(azimuthDeg)), dirFy = cos(radians(azimuthDeg))
-- Projection: P = ax_world * dirFx + ay_world * dirFy
-- Integration: V[i] = V[i-1] + P[i] * dt, with dt from LA timestamps
-- Files: per-sensor CSVs plus combined snapshot CSV
+Orientation:
+
+GM: R_gm = getRotationMatrix(gravity, magnetic)
+
+RV: R_rv = getRotationMatrixFromVector(rotVec)
+
+World = ENU; device?world via R?.
+
+Heading from UI: dirFx = sin(rad(azimuthDeg)), dirFy = cos(rad(azimuthDeg)).
+
+Projection: P = ax_world*dirFx + ay_world*dirFy.
+
+Integration: V[i] = V[i-1] + P[i]*dt with dt from LA timestamps.
+
+Reference path for compatibility: GM raw P/V.
+
+Files: per-sensor CSVs + combined snapshot CSV; LA CSV augmented as above.
 
 HYPOTHESES TO TEST
 
-H1. Orientation staleness (GRAV+MAG) during motion skews P
-H2. Use orientation cadence for dt and integrate only when orientation is fresh
-H3. Low-pass filter LA to reduce sharp swings (tune cutoff)
-H4. Newer hardware with faster GRAV+MAG reduces lag
-H5. Gyro-aided orientation (Rotation Vector) improves projection under dynamics
-H6. Use ACC minus gravity instead of vendor LA
-H7. Sensor fusion caveats: GRAV low-passed and MAG noisy; cross-sensor timestamp skew matters
+H1 Orientation staleness (GRAV+MAG) during motion skews P.
+
+H2 Use orientation cadence for dt; integrate only when orientation is fresh.
+
+H3 Low-pass filter LA to reduce sharp swings (tune cutoff).
+
+H4 Newer hardware with faster GRAV+MAG reduces lag.
+
+H5 Gyro-aided orientation (RV) improves projection under dynamics.
+
+H6 Use ACC minus gravity instead of vendor LA.
+
+H7 Cross-sensor timestamp skew and fusion caveats (GRAV low-passed, MAG noisy).
 
 SINGLE-CHANGE EXPERIMENT QUEUE
 
-E1. Log GM orientation age and yaw (diagnostic only; no behavior change)
-E2. Add RV orientation alongside GM; log P_rv, V_rv, oriAgeRV, yawRVdeg (diagnostic only)
-E3. Compare ACC - g (world frame) vs LA for projection and integration (diagnostic only)
-E4. Gate integration by orientation freshness threshold (behavior change)
-E5. Integrate on orientation cadence using latest LA (behavior change)
-E6. Low-pass filter LA (behavior change)
-E7. Repeat tests on newer hardware (environment change)
+E1 Log GM orientation age & yaw — ? (diagnostic only)
+
+E2 Add RV pipeline & logs — ? (diagnostic only)
+
+E3 ACC–g vs LA for projection/integration — ? (diagnostic only)
+
+E4 Gate integration by orientation-freshness (behavior change) — ?
+
+E5 Integrate on orientation cadence using latest LA (behavior change) — ?
+
+E6 Low-pass filter LA (behavior change; currently diagnostic-only SMA) — ?
+
+E7 Repeat tests on newer hardware (env change) — ?
 
 TEST PROTOCOL
 
-1) Place phone with known heading; set azimuth in UI
-2) Phases: Still >= 5 s -> Move 1-3 s -> Still >= 5 s
-3) Save CSVs and note scenario (desk, location, device)
-4) Plot oriAgeGM, P, V vs time; compute stillness metrics (mean V, std V)
-5) Decision: keep or reject the single change based on offset reduction and responsiveness
+Place phone with known heading; set azimuth in UI.
 
-FILE SCHEMAS
+Phases: Still =5 s ? Move 1–3 s (straight) ? Still =5 s.
 
-LA (with E1):
-prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,P,V,oriAgeGM,yawGMdeg
+Save CSVs; note scenario (desk/location/device).
 
-ACC/GRAV/MAG:
-timestamp,val0,val1,val2
+Plot oriAgeGM, P, V; compute stillness metrics (mean/std of V).
 
-Combined:
-sysTs,laTs,laX,laY,laZ,accTs,accX,accY,accZ,gravTs,gravX,gravY,gravZ,magTs,magX,magY,magZ,P
+Compare end-distance error vs 20 m per pipe (uncalibrated).
+
+Decide whether to proceed with gating/cadence/filters.
 
 NEXT ACTION
 
-- Run E1 desk tests in two locations (old desk and new desk)
-- Share LA CSV and quick plots of oriAgeGM, P, V
-- Decide whether stale orientation explains post-motion V offsets
+Run paired 20 m tests across locations; share LA CSVs and quick plots of oriAgeGM, P, V, smoothed V/S.
+
+Compare GM vs RV vs ACC–g end-distance errors (no area matching).
+
+If staleness correlates, trial E4/E5; otherwise, tune smoothing window or explore early-run bias prediction (ridge) for online correction.
 
 PARKING LOT / OPEN QUESTIONS
 
-- What oriAge threshold is acceptable in your environments (start with 20-40 ms)?
-- Does RV hold up indoors at your locations?
-- What LPF cutoff preserves swimmer dynamics without hiding real accelerations?
-- Mounting repeatability across desks and locations?
+Acceptable oriAge threshold (start with 20–40 ms)?
+
+Does RV hold up indoors at your locations?
+
+What LPF cutoff preserves dynamics without hiding true acceleration?
+
+Mounting repeatability across desks/locations?
+
+Data volume needed to train a simple predictor for per-run slope/intercept?
 
 DECISIONS LOG
 
-- ZUPT: excluded by design
-- Workflow: one change per experiment; measure -> decide -> proceed
+ZUPT: excluded by design.
+
+Workflow: one behavioral change at a time; measure ? decide ? proceed.
+
+Diagnostics may be layered if they don’t alter reference behavior.
+
+ChatGPT can make mistakes. Check im
