@@ -47,3 +47,4 @@ app/.gitignore
 .idea/.gitignore
 /logs/adb_pull.bat
 /logs/*.csv
+sensor_logs/*.csv
