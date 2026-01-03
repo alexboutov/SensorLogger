@@ -1,104 +1,71 @@
-SensorLogger Project Summary – Context & Decisions Log
+SensorLogger Project Summary - Context & Decisions Log
+
 PROJECT SNAPSHOT
-
 minSdk=26 targetSdk=34 jdk=17
-
 binding=viewBinding dataBinding=false compose=false
-
 material=true activityKtx=true
 
 SESSION REQUESTS
-
 (fill in at start of next session)
 
 CHANGES SINCE LAST SUMMARY
 Orientation, pipelines, and diagnostics
 
 E1 (done): Instrument orientation staleness (GM).
-
-LA CSV now logs oriAgeGM and yawGMdeg per row.
-
-oriTsNs = max(latestGRAV.ts, latestMAG.ts), oriAgeGM = max(0, laTsNs - oriTsNs)*1e-9.
+- LA CSV now logs oriAgeGM and yawGMdeg per row.
+- oriTsNs = max(latestGRAV.ts, latestMAG.ts), oriAgeGM = max(0, laTsNs - oriTsNs)*1e-9.
 
 E2 (added, diagnostic only): Added Rotation Vector (RV) pipeline.
+- Logs P_rv, V_rv, oriAgeRV, yawRVdeg.
 
-Logs P_rv, V_rv, oriAgeRV, yawRVdeg.
-
-E3 (added, diagnostic only): Added ACC – g pipeline.
-
-Device frame: linDev = ACC - GRAVITY, then rotate with R? (GM) to world ENU.
-
-Logs P_accGM, V_accGM, accAgeSec.
+E3 (added, diagnostic only): Added ACC–g pipeline.
+- Device frame: linDev = ACC - GRAVITY, then rotate with R? (GM) to world ENU.
+- Logs P_accGM, V_accGM, accAgeSec.
 
 Correct heading & world transform
-
-Fixed sign/axes for GM/RV: Use R? to map device?world (ENU), then project:
-dirFx = sin(radians(azimuthDeg)) (East), dirFy = cos(radians(azimuthDeg)) (North).
+- Fixed sign/axes for GM/RV: Use R? to map device?world (ENU), then project.
+- dirFx = sin(radians(azimuthDeg)), dirFy = cos(radians(azimuthDeg)).
 
 ACC pipeline corrected: compute ACC - gravity in device, then rotate with R? to world before projection.
 
 Smoothing (diagnostic only; no behavior change)
-
-Centered SMA on P for all three pipes (n=20 ? window=41).
-
-Integrated smoothed velocity & distance per pipe:
-Pgm_smooth, Prv_smooth, PaccGM_smooth, Vgm_smooth, Sgm_smooth, Vrv_smooth, Srv_smooth, VaccGM_smooth, SaccGM_smooth.
+- Centered SMA on P for all three pipes (n=20 ? window=41).
+- Integrated smoothed velocity & distance per pipe: Pgm_smooth, Prv_smooth, PaccGM_smooth, Vgm_smooth, Sgm_smooth, Vrv_smooth, Srv_smooth, VaccGM_smooth, SaccGM_smooth.
 
 Data quality flags (diagnostic only)
-
-Staleness: isOriStaleGM, isOriStaleRV, isAccStale (thresholds 40 ms).
-
-LA health: isLaSat (|LA|>25 m/s²), isLaJump (per-sample jump >5 m/s²).
-
-Projection outliers: isPgmOutlier, isPrvOutlier (|P|>10 m/s²).
-
-Environment: isGravAnom (|g|-9.81 >1.5), isMagAnom (|B| outside 20–70 µT).
+- Staleness: isOriStaleGM, isOriStaleRV, isAccStale (thresholds 40 ms).
+- LA health: isLaSat (|LA|>25 m/s²), isLaJump (per-sample jump >5 m/s²).
+- Projection outliers: isPgmOutlier, isPrvOutlier (|P|>10 m/s²).
+- Environment: isGravAnom (|g|-9.81 >1.5), isMagAnom (|B| outside 20–70 µT).
 
 Post-processing after STOP (file rewrite in-place)
-
-Linear detrend of velocities per pipe: estimate slope/intercept for V, V_rv, V_accGM and smoothed counterparts.
-
-Add detrended velocity columns:
-V_detrend, V_rv_detrend, V_accGM_detrend, Vgm_smooth_detrend, Vrv_smooth_detrend, VaccGM_smooth_detrend.
-
-Append footer rows with #slope and #intercept (high precision).
-
-In-place rewrite of the original LA CSV (no duplicate run_<NEWtime>_*.csv): the app memorizes the LA filename and replaces it via a temp file + rename.
-
-Formatting: most numeric columns now 3 decimals; footer slopes/intercepts remain 9 decimals.
+- Linear detrend of velocities per pipe: slope/intercept for V, V_rv, V_accGM and smoothed counterparts.
+- Add detrended velocity columns: V_detrend, V_rv_detrend, V_accGM_detrend, Vgm_smooth_detrend, Vrv_smooth_detrend, VaccGM_smooth_detrend.
+- Append footer rows with #slope and #intercept (high precision).
+- In-place rewrite of the original LA CSV (no duplicate run_<NEWtime>_*.csv).
+- Formatting: runtime columns 3 decimals; footer slopes/intercepts 9 decimals.
 
 UI improvements
-
-Hides numeric keypad immediately on Done, on focus loss, and on START/STOP.
-
-Removed duplicate <EditText> from layout; single Material TextInputEditText remains.
-
-Azimuth normalized into [0, 360) before passing to service.
+- Hides numeric keypad immediately on Done, on focus loss, and on START/STOP.
+- Removed duplicate <EditText>; single Material TextInputEditText remains.
+- Azimuth normalized into [0, 360) before passing to service.
 
 Behavior unchanged (primary path)
-
-The reference P/V used for combined CSV and compatibility remains GM (raw) integrated on the LA clock.
-
-All new columns are diagnostic/additive—no gating, no filtering of the primary path.
+- Reference P/V used for combined CSV remains GM (raw) integrated on LA clock.
+- All new columns are diagnostic/additive — no gating, no filtering of the primary path.
 
 SERVICE STABILITY & ORDERING
-
-STOP: isLogging=false ? unregister sensors ? cancel writes ? close writers.
-
-All writes guarded by isLogging/writersOpen.
-
-Single-threaded dispatcher ensures FIFO write order.
+- STOP: isLogging=false ? unregister sensors ? cancel writes ? close writers.
+- All writes guarded by isLogging/writersOpen.
+- Single-threaded dispatcher ensures FIFO write order.
 
 TIMING
-
-LA timing uses event.timestamp (monotonic ns).
-
-laClockSec = accumulated seconds since START.
-
-ACC/GRAV/MAG/RV use their own sensor timestamps.
+- LA timing uses event.timestamp (monotonic ns).
+- laClockSec = accumulated seconds since START.
+- ACC/GRAV/MAG/RV use their own sensor timestamps.
 
 CSV SCHEMAS
-LA (runtime columns; 3dp formatting on most numeric fields)
+LA (runtime columns; 3dp)
 prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,Azimuth,
 P,V,oriAgeGM,yawGMdeg,
 P_rv,V_rv,oriAgeRV,yawRVdeg,
@@ -117,202 +84,122 @@ timestamp,val0,val1,val2
 
 Combined snapshot (unchanged)
 sysTs,laTs,laX,laY,laZ,accTs,accX,accY,accZ,gravTs,gravX,gravY,gravZ,magTs,magX,magY,magZ,P
-
-
-P in combined is GM P when available; else 0.
+(P in combined is GM P when available; else 0.)
 
 OPEN ISSUES
-
-Validate if orientation staleness is the primary driver of post-motion V offsets across environments.
-
-Compare GM vs RV vs ACC–g pipelines using uncalibrated end-distance error (20 m tests).
-
-Determine robust oriAge thresholds and whether gating helps (E4/E5).
-
-Assess ACC–g consistency indoors and under dynamics.
-
-Consider lightweight online bias prediction (per-run slope/intercept) from early-run features.
+- Validate if orientation staleness is the primary driver of post-motion V offsets.
+- Compare GM vs RV vs ACC–g pipelines using end-distance error (20 m tests).
+- Determine robust oriAge thresholds and gating benefit (E4/E5).
+- Assess ACC–g consistency indoors and under dynamics.
+- Consider lightweight online bias prediction (per-run slope/intercept).
 
 DONE TODAY
-
-Fixed heading mapping and R? world transform; corrected ACC–g pipeline.
-
-Added RV and ACC–g diagnostic pipelines; centered SMA smoothing + smoothed V/S.
-
-Implemented quality flags and post-processing detrend with in-place CSV rewrite.
-
-Standardized 3-decimal formatting (runtime & detrended columns); high-precision footers.
-
-UI polish: hide keypad on Done/focus loss/START–STOP; removed duplicate input.
+- Fixed heading mapping and R? world transform; corrected ACC–g pipeline.
+- Added RV and ACC–g diagnostic pipelines; centered SMA smoothing.
+- Implemented quality flags and post-processing detrend.
+- Standardized 3-decimal formatting (runtime & detrended); high-precision footers.
+- UI polish: hide keypad; removed duplicate input.
+- **Tagged baseline as `la-triggered-projection-2025-09-15`. This label marks current state before adding gyro-predicted orientation.**
 
 ENVIRONMENT SETUP
-
 JAVA_HOME ? JDK 17 (Windows). PATH includes %JAVA_HOME%\bin.
-
 Android Studio JBR present; Gradle uses JDK 17 via org.gradle.java.home.
-
 If device not detected over USB: try another port (SM-G930V fix observed).
 
 GRADLE & BUILD TOOLS
-
 Gradle wrapper: 8.6
-
 Kotlin: 1.9.20
-
 org.gradle.java.home=C:\Program Files\Java\jdk-17
-
 Repos: google(), mavenCentral()
 
 APP & SDK CONFIG
-
 compileSdk=34, minSdk=26, targetSdk=34
-
 Java/Kotlin: Java 17, jvmTarget=17
-
 Deps (core):
-
 androidx.core:core-ktx:1.12.0, androidx.core:core:1.12.0
-
 androidx.appcompat:appcompat:1.6.1
-
 com.google.android.material:material:1.9.0
-
 androidx.constraintlayout:constraintlayout:2.1.4
-
 androidx.activity:activity-ktx:1.8.2
-
 org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.1
-
 ViewBinding: ON, Data Binding: OFF
-
 No Room, Retrofit, or Compose
 
 ANDROIDMANIFEST
-
 Removed package attribute (namespace in Gradle).
-
 Uses permission: WAKE_LOCK.
 
 BUILD & RUN PROGRESS
-
 Foreground service with wakelock; starts/stops cleanly.
-
 CSVs generated with monotonic sensor timestamps.
-
-LA CSV now includes diagnostics, smoothing, flags, and post-processed detrends.
-
+LA CSV includes diagnostics, smoothing, flags, and post-processed detrends.
 File rewrite is in-place (no duplicate timestamped LA CSVs).
 
 PHYSICAL DEVICE TESTING
-
 Samsung SM-G930V (Android 8.0, API 26).
-
-Desk tests: P sign/direction reasonable; sign fixed for GM/RV; ACC–g corrected.
-
-20 m walks (forward/back with static UI azimuth) used to validate heading/sign and drift.
+Desk tests: P sign/direction reasonable; fixed for GM/RV; ACC–g corrected.
+20 m walks validated heading/sign and drift.
 
 KEY DECISIONS & PREFERENCES
-
-No ZUPT (by design). Expose and fix root causes.
-
-One-change workflow for behavior changes; diagnostics can be layered if they don’t alter reference behavior.
-
-Keep project minimal (only essentials).
-
-Before any drop-in update, paste current file to ensure consistency.
+- No ZUPT (by design). Focus on root causes of drift.
+- One-change workflow for behavior changes; diagnostics may be layered.
+- **Maintain LA-triggered projection as baseline (tagged).**
+- Next: add gyro-predicted orientation path and an ORI-triggered path for side-by-side comparison.
+- Before any drop-in update, paste current file to ensure consistency.
 
 CURRENT BASELINE
-
-Orientation:
-
-GM: R_gm = getRotationMatrix(gravity, magnetic)
-
-RV: R_rv = getRotationMatrixFromVector(rotVec)
-
-World = ENU; device?world via R?.
-
-Heading from UI: dirFx = sin(rad(azimuthDeg)), dirFy = cos(rad(azimuthDeg)).
-
-Projection: P = ax_world*dirFx + ay_world*dirFy.
-
-Integration: V[i] = V[i-1] + P[i]*dt with dt from LA timestamps.
-
-Reference path for compatibility: GM raw P/V.
-
-Files: per-sensor CSVs + combined snapshot CSV; LA CSV augmented as above.
+- Orientation:
+  GM: R_gm = getRotationMatrix(gravity, magnetic)
+  RV: R_rv = getRotationMatrixFromVector(rotVec)
+- World = ENU; device?world via R?.
+- Heading from UI: dirFx = sin(rad(azimuthDeg)), dirFy = cos(rad(azimuthDeg)).
+- Projection: P = ax_world*dirFx + ay_world*dirFy.
+- Integration: V[i] = V[i-1] + P[i]*dt with dt from LA timestamps.
+- Reference path for compatibility: GM raw P/V.
+- Files: per-sensor CSVs + combined snapshot CSV; LA CSV augmented.
 
 HYPOTHESES TO TEST
-
-H1 Orientation staleness (GRAV+MAG) during motion skews P.
-
+H1 Orientation staleness (GRAV+MAG) skews P.
 H2 Use orientation cadence for dt; integrate only when orientation is fresh.
-
-H3 Low-pass filter LA to reduce sharp swings (tune cutoff).
-
-H4 Newer hardware with faster GRAV+MAG reduces lag.
-
+H3 Low-pass filter LA to reduce swings (tune cutoff).
+H4 Faster GRAV+MAG on newer hardware reduces lag.
 H5 Gyro-aided orientation (RV) improves projection under dynamics.
-
-H6 Use ACC minus gravity instead of vendor LA.
-
-H7 Cross-sensor timestamp skew and fusion caveats (GRAV low-passed, MAG noisy).
+H6 ACC minus gravity instead of vendor LA may help.
+H7 Cross-sensor timestamp skew and fusion caveats.
 
 SINGLE-CHANGE EXPERIMENT QUEUE
-
-E1 Log GM orientation age & yaw — ? (diagnostic only)
-
-E2 Add RV pipeline & logs — ? (diagnostic only)
-
-E3 ACC–g vs LA for projection/integration — ? (diagnostic only)
-
-E4 Gate integration by orientation-freshness (behavior change) — ?
-
-E5 Integrate on orientation cadence using latest LA (behavior change) — ?
-
-E6 Low-pass filter LA (behavior change; currently diagnostic-only SMA) — ?
-
-E7 Repeat tests on newer hardware (env change) — ?
+E1 Log GM orientation age & yaw – ? done
+E2 Add RV pipeline & logs – ? done
+E3 ACC–g vs LA – ? done
+E4 Gate integration by orientation-freshness (behavior)
+E5 Integrate on orientation cadence (behavior)
+E6 Low-pass filter LA (behavior; SMA currently diagnostic-only)
+E7 Repeat tests on newer hardware (env change)
 
 TEST PROTOCOL
-
 Place phone with known heading; set azimuth in UI.
-
-Phases: Still =5 s ? Move 1–3 s (straight) ? Still =5 s.
-
-Save CSVs; note scenario (desk/location/device).
-
-Plot oriAgeGM, P, V; compute stillness metrics (mean/std of V).
-
-Compare end-distance error vs 20 m per pipe (uncalibrated).
-
-Decide whether to proceed with gating/cadence/filters.
+Phases: Still ~5 s ? Move 1–3 s (straight) ? Still ~5 s.
+Save CSVs; note scenario.
+Plot oriAgeGM, P, V; compute stillness metrics.
+Compare end-distance error vs 20 m per pipe.
+Decide on gating/cadence/filters.
 
 NEXT ACTION
-
-Run paired 20 m tests across locations; share LA CSVs and quick plots of oriAgeGM, P, V, smoothed V/S.
-
-Compare GM vs RV vs ACC–g end-distance errors (no area matching).
-
-If staleness correlates, trial E4/E5; otherwise, tune smoothing window or explore early-run bias prediction (ridge) for online correction.
+- Run paired 20 m tests with LA-triggered baseline (tagged).
+- Then implement gyro-predicted orientation path and ORI-triggered path.
+- Compare responsiveness and velocity drift between approaches.
 
 PARKING LOT / OPEN QUESTIONS
-
-Acceptable oriAge threshold (start with 20–40 ms)?
-
-Does RV hold up indoors at your locations?
-
-What LPF cutoff preserves dynamics without hiding true acceleration?
-
-Mounting repeatability across desks/locations?
-
-Data volume needed to train a simple predictor for per-run slope/intercept?
+- Acceptable oriAge threshold (20–40 ms)?
+- Does RV hold up indoors?
+- What LPF cutoff preserves dynamics?
+- Mounting repeatability across tests?
+- Data volume needed for bias predictor?
 
 DECISIONS LOG
+- ZUPT excluded by design.
+- One-change workflow.
+- Diagnostics can be layered if no effect on reference behavior.
+- Current baseline labeled `la-triggered-projection-2025-09-15`.
 
-ZUPT: excluded by design.
-
-Workflow: one behavioral change at a time; measure ? decide ? proceed.
-
-Diagnostics may be layered if they don’t alter reference behavior.
-
-ChatGPT can make mistakes. Check im
+ChatGPT can make mistakes. Check implementation carefully.

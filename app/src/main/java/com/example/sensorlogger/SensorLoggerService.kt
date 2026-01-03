@@ -56,6 +56,10 @@ class SensorLoggerService : Service(), SensorEventListener {
     // Post-processing config
     private val DIST_METERS = 20.0               // assumed known distance per test
 
+    // Gyro-prediction config (LA-triggered engine)
+    private val PRED_WINDOW_SEC = 0.25           // keep ~250 ms of gyro/orientation history
+    private val MAX_PRED_MS = 50L                // cap forward prediction/span to 50 ms
+
     // ==============================
     // Types (class scope)
     // ==============================
@@ -107,7 +111,17 @@ class SensorLoggerService : Service(), SensorEventListener {
         val flagPgmOut: Boolean?,
         val flagPrvOut: Boolean?,
         val flagGravAnom: Boolean?,
-        val flagMagAnom: Boolean?
+        val flagMagAnom: Boolean?,
+
+        // ===== NEW: LA-triggered predicted projection (gyro-predicted orientation) =====
+        val p_pred: Double? = null,
+        val v_pred: Double? = null,
+        val oriTsNsUsed: Long? = null,
+        val oriAgeSec_pred: Double? = null,
+        val gyroSpanMs_pred: Double? = null,
+        val yawDeg_pred: Double? = null,
+        val pitchDeg_pred: Double? = null,
+        val rollDeg_pred: Double? = null
     )
 
     // ==============================
@@ -157,6 +171,20 @@ class SensorLoggerService : Service(), SensorEventListener {
     private var vAccum_gm: Double = 0.0     // integrates raw P_gm
     private var vAccum_rv: Double = 0.0     // integrates raw P_rv
     private var vAccum_accGM: Double = 0.0  // integrates raw P_accGM
+
+    // ===== NEW: LA-triggered engine (gyro-predicted orientation) =====
+//    private val engineLA = ProjectionEngineLA(PRED_WINDOW_SEC, MAX_PRED_MS)
+    private val engineLA = ProjectionEngineORI(PRED_WINDOW_SEC)
+
+    private var vAccum_pred: Double = 0.0
+
+    // Telemetry placeholders (optional class-level mirrors)
+    private var lastOriTsUsed: Long = 0L
+    private var lastOriAgeSec: Double = Double.NaN
+    private var lastGyroSpanMs: Double = Double.NaN
+    private var lastYawDeg: Double = Double.NaN
+    private var lastPitchDeg: Double = Double.NaN
+    private var lastRollDeg: Double = Double.NaN
 
     /** Concurrency & lifecycle guards */
     private val ioErrorHandler = CoroutineExceptionHandler { _, e ->
@@ -236,6 +264,7 @@ class SensorLoggerService : Service(), SensorEventListener {
         vAccum_gm = 0.0
         vAccum_rv = 0.0
         vAccum_accGM = 0.0
+        vAccum_pred = 0.0
         prevLaTsNs = 0L
         laClockSec = 0.0
 
@@ -249,6 +278,14 @@ class SensorLoggerService : Service(), SensorEventListener {
         sSmAccum_gm = 0.0; sSmAccum_rv = 0.0; sSmAccum_accGM = 0.0
         lastSmaTsNs_gm = 0L; lastSmaTsNs_rv = 0L; lastSmaTsNs_accGM = 0L
         pendingRows.clear()
+
+        engineLA.clear()
+        lastOriTsUsed = 0L
+        lastOriAgeSec = Double.NaN
+        lastGyroSpanMs = Double.NaN
+        lastYawDeg = Double.NaN
+        lastPitchDeg = Double.NaN
+        lastRollDeg = Double.NaN
 
         registerSensors()
         return START_STICKY
@@ -318,7 +355,8 @@ class SensorLoggerService : Service(), SensorEventListener {
             Sensor.TYPE_ACCELEROMETER,
             Sensor.TYPE_GRAVITY,
             Sensor.TYPE_MAGNETIC_FIELD,
-            Sensor.TYPE_ROTATION_VECTOR
+            Sensor.TYPE_ROTATION_VECTOR,
+            Sensor.TYPE_GYROSCOPE              // NEW: buffer-only (no CSV)
         ).forEach { type ->
             sensorManager.getDefaultSensor(type)?.let {
                 sensorManager.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST)
@@ -341,6 +379,7 @@ class SensorLoggerService : Service(), SensorEventListener {
         val sensorTsNs = event.timestamp
         val values = event.values.copyOf()
 
+        // Fast path: cache the latest raw vectors/timestamps
         when (sensorType) {
             Sensor.TYPE_GRAVITY -> {
                 System.arraycopy(values, 0, gravity, 0, 3)
@@ -481,6 +520,47 @@ class SensorLoggerService : Service(), SensorEventListener {
                         val flagGravAnom = if (hasGravity) (abs(gravMag - GRAV_NORM) > GRAV_TOL) else null
                         val flagMagAnom  = if (hasMagnetic) (magMagUt < MAG_MIN_UT || magMagUt > MAG_MAX_UT) else null
 
+                        // ======== NEW: LA-triggered predicted orientation ========
+                        var local_pPred: Double? = null
+                        var local_vPred: Double? = null
+                        var local_oriTs: Long? = null
+                        var local_oriAge: Double? = null
+                        var local_gyroSpan: Double? = null
+                        var local_yaw: Double? = null
+                        var local_pitch: Double? = null
+                        var local_roll: Double? = null
+                        // Ensure the ORI engine sees an orientation sample even if GRAV/MAG/RV events are queued behind LA
+                        if (hasRV) {
+                            val qRV = OrientationUtils.fromRotVec(rotVec)
+                            engineLA.onOri(OriSample(ts = latestRotTsNs, q = qRV))
+                        } else if (hasGravity && hasMagnetic) {
+                            // Use GM fallback when RV not present
+                            SensorManager.getRotationMatrix(rotMatrixGM, null, gravity, magnetic)
+                            val qGM = OrientationUtils.fromRotationMatrix(rotMatrixGM)
+                            val tOri = maxOf(latestGRAV.ts, latestMAG.ts)
+                            engineLA.onOri(OriSample(ts = tOri, q = qGM))
+                        }
+
+                        val pred = engineLA.onLa(curr, laX, laY, laZ, dirFx, dirFy)
+                        if (pred != null) {
+                            local_pPred = pred.pPred
+                            if (prevForLine != 0L) vAccum_pred = engineLA.addToVelocity(dtSec, pred.pPred)
+                            local_vPred = vAccum_pred
+                            local_oriTs = pred.oriTsUsed
+                            local_oriAge = pred.oriAgeSec
+                            local_gyroSpan = pred.gyroSpanMs
+                            local_yaw = pred.yawDeg
+                            local_pitch = pred.pitchDeg
+                            local_roll = pred.rollDeg
+
+                            lastOriTsUsed = pred.oriTsUsed
+                            lastOriAgeSec = pred.oriAgeSec
+                            lastGyroSpanMs = pred.gyroSpanMs
+                            lastYawDeg = pred.yawDeg
+                            lastPitchDeg = pred.pitchDeg
+                            lastRollDeg = pred.rollDeg
+                        }
+
                         // ======== Build row ========
                         val row = LaRow(
                             prevLaTsNs = prevForLine,
@@ -515,7 +595,16 @@ class SensorLoggerService : Service(), SensorEventListener {
                             flagPgmOut = flagPgmOut,
                             flagPrvOut = flagPrvOut,
                             flagGravAnom = flagGravAnom,
-                            flagMagAnom = flagMagAnom
+                            flagMagAnom = flagMagAnom,
+                            // NEW fields
+                            p_pred = local_pPred,
+                            v_pred = local_vPred,
+                            oriTsNsUsed = local_oriTs,
+                            oriAgeSec_pred = local_oriAge,
+                            gyroSpanMs_pred = local_gyroSpan,
+                            yawDeg_pred = local_yaw,
+                            pitchDeg_pred = local_pitch,
+                            rollDeg_pred = local_roll
                         )
                         pendingRows.addLast(row)
 
@@ -596,12 +685,31 @@ class SensorLoggerService : Service(), SensorEventListener {
                     }
                     Sensor.TYPE_GRAVITY -> {
                         writeSimple(sensorType, sensorTsNs, values)
+                        // push orientation sample (GM) to engine when both are available
+                        if (hasGravity && hasMagnetic) {
+                            SensorManager.getRotationMatrix(rotMatrixGM, null, gravity, magnetic)
+                            val qGM = OrientationUtils.fromRotationMatrix(rotMatrixGM)
+                            val tOri = maxOf(latestGRAV.ts, latestMAG.ts)
+                            engineLA.onOri(OriSample(ts = tOri, q = qGM))
+                        }
                     }
                     Sensor.TYPE_MAGNETIC_FIELD -> {
                         writeSimple(sensorType, sensorTsNs, values)
+                        if (hasGravity && hasMagnetic) {
+                            SensorManager.getRotationMatrix(rotMatrixGM, null, gravity, magnetic)
+                            val qGM = OrientationUtils.fromRotationMatrix(rotMatrixGM)
+                            val tOri = maxOf(latestGRAV.ts, latestMAG.ts)
+                            engineLA.onOri(OriSample(ts = tOri, q = qGM))
+                        }
                     }
                     Sensor.TYPE_ROTATION_VECTOR -> {
                         writeSimple(sensorType, sensorTsNs, values)
+                        val qRV = OrientationUtils.fromRotVec(rotVec)
+                        engineLA.onOri(OriSample(ts = latestRotTsNs, q = qRV))
+                    }
+                    Sensor.TYPE_GYROSCOPE -> {
+                        // Buffer gyro for prediction (no CSV)
+                        engineLA.onGyro(GyroSample(sensorTsNs, values[0], values[1], values[2]))
                     }
                 }
 
@@ -696,7 +804,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                 if (r.haveRV) append(String.format(Locale.US, "%.3f", r.v_rv)) else append("")
 
                 append(",")
-                // oriAgeRV, yawRVdeg (unchanged formatting)
+                // oriAgeRV, yawRVdeg
                 if (r.haveRV && r.oriAgeRV != null) append(String.format(Locale.US, "%.4f", r.oriAgeRV)) else append("")
                 append(",")
                 if (r.haveRV && r.yawRVdeg != null) append(String.format(Locale.US, "%.1f", r.yawRVdeg)) else append("")
@@ -731,7 +839,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                 append(",")
                 if (r.s_accGM_smooth != null) append(String.format(Locale.US, "%.3f", r.s_accGM_smooth)) else append("")
 
-                // ===== Flags (0/1), blanks when N/A) =====
+                // ===== Flags (0/1), blanks when N/A =====
                 fun appendFlag(b: Boolean?) {
                     append(",")
                     if (b == null) append("") else append(if (b) "1" else "0")
@@ -746,6 +854,17 @@ class SensorLoggerService : Service(), SensorEventListener {
                 appendFlag(r.flagPrvOut)     // isPrvOutlier
                 appendFlag(r.flagGravAnom)   // isGravAnom
                 appendFlag(r.flagMagAnom)    // isMagAnom
+
+                // ===== NEW: LA-triggered predicted columns =====
+                append(","); if (r.p_pred != null) append(String.format(Locale.US, "%.3f", r.p_pred)) else append("")
+                append(","); if (r.v_pred != null) append(String.format(Locale.US, "%.3f", r.v_pred)) else append("")
+                append(","); if (r.oriTsNsUsed != null) append(r.oriTsNsUsed) else append("")
+                append(","); if (r.oriAgeSec_pred != null) append(String.format(Locale.US, "%.4f", r.oriAgeSec_pred)) else append("")
+                append(","); if (r.gyroSpanMs_pred != null) append(String.format(Locale.US, "%.2f", r.gyroSpanMs_pred)) else append("")
+                append(","); if (r.yawDeg_pred != null) append(String.format(Locale.US, "%.1f", r.yawDeg_pred)) else append("")
+                append(","); if (r.pitchDeg_pred != null) append(String.format(Locale.US, "%.1f", r.pitchDeg_pred)) else append("")
+                append(","); if (r.rollDeg_pred != null) append(String.format(Locale.US, "%.1f", r.rollDeg_pred)) else append("")
+
                 append("\n")
             }
             w.write(line); w.flush()
@@ -777,6 +896,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                 Sensor.TYPE_GRAVITY            -> "grav"
                 Sensor.TYPE_MAGNETIC_FIELD     -> "mag"
                 Sensor.TYPE_ROTATION_VECTOR    -> "rotvec"
+                // We intentionally do not create a CSV for gyro
                 else                           -> "other"
             }
 
@@ -791,7 +911,7 @@ class SensorLoggerService : Service(), SensorEventListener {
             val writer = FileWriter(file, true)
             if (file.length() == 0L) {
                 val header = when (sensorType) {
-                    // Note: header names unchanged; only formatting changed
+                    // Note: header names unchanged; only appended new columns at end for LA
                     Sensor.TYPE_LINEAR_ACCELERATION ->
                         "prevLaTsNs,laTsNs,laClockSec,laX,laY,laZ,Azimuth," +
                                 "P,V,oriAgeGM,yawGMdeg," +
@@ -799,7 +919,8 @@ class SensorLoggerService : Service(), SensorEventListener {
                                 "P_accGM,V_accGM,accAgeSec," +
                                 "Pgm_smooth,Prv_smooth,PaccGM_smooth," +
                                 "Vgm_smooth,Sgm_smooth,Vrv_smooth,Srv_smooth,VaccGM_smooth,SaccGM_smooth," +
-                                "isOriStaleGM,isOriStaleRV,isAccStale,isLaSat,isLaJump,isPgmOutlier,isPrvOutlier,isGravAnom,isMagAnom\n"
+                                "isOriStaleGM,isOriStaleRV,isAccStale,isLaSat,isLaJump,isPgmOutlier,isPrvOutlier,isGravAnom,isMagAnom," +
+                                "P_pred,V_pred,oriTsNsUsed,oriAgeSec_pred,gyroSpanMs_pred,yawDeg_pred,pitchDeg_pred,rollDeg_pred\n"
                     else -> "timestamp,val0,val1,val2\n"
                 }
                 writer.write(header)
