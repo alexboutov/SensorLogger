@@ -23,10 +23,14 @@ private const val PREFS_NAME = "sensor_logger_prefs"
 private const val PREF_AZIMUTH = "azimuth_deg"
 private const val PREF_DISTANCE = "distance_meters"
 private const val PREF_TARGET_TIME = "target_time_sec"
+private const val PREF_FAST_THRESHOLD = "fast_threshold_pct"
+private const val PREF_SLOW_THRESHOLD = "slow_threshold_pct"
 
 // Default values
 private const val DEFAULT_DISTANCE = "13.716"    // 15 yards in meters
 private const val DEFAULT_TARGET_TIME = "10.0"   // seconds
+private const val DEFAULT_FAST_THRESHOLD = "20"    // % above target velocity
+private const val DEFAULT_SLOW_THRESHOLD = "15"    // % below target velocity
 
 class MainActivity : AppCompatActivity() {
 
@@ -77,6 +81,11 @@ class MainActivity : AppCompatActivity() {
         binding.azimuthEditText.setText(lastAzimuth)
         binding.distanceEditText.setText(lastDistance)
         binding.targetTimeEditText.setText(lastTargetTime)
+        
+        val lastFastThreshold = prefs.getString(PREF_FAST_THRESHOLD, DEFAULT_FAST_THRESHOLD) ?: DEFAULT_FAST_THRESHOLD
+        val lastSlowThreshold = prefs.getString(PREF_SLOW_THRESHOLD, DEFAULT_SLOW_THRESHOLD) ?: DEFAULT_SLOW_THRESHOLD
+        binding.fastThresholdEditText.setText(lastFastThreshold)
+        binding.slowThresholdEditText.setText(lastSlowThreshold)
 
         // Initial label for the single button
         updateStartStopLabel()
@@ -131,6 +140,14 @@ class MainActivity : AppCompatActivity() {
         binding.targetTimeEditText.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus) hideKeyboard()
         }
+        
+        binding.fastThresholdEditText.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) hideKeyboard()
+        }
+        
+        binding.slowThresholdEditText.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) hideKeyboard()
+        }
 
         // Single START/STOP toggle
         binding.startStopButton.setOnClickListener {
@@ -182,11 +199,15 @@ class MainActivity : AppCompatActivity() {
         val azText = binding.azimuthEditText.text?.toString()?.trim().orEmpty()
         val distText = binding.distanceEditText.text?.toString()?.trim().orEmpty()
         val timeText = binding.targetTimeEditText.text?.toString()?.trim().orEmpty()
+        val fastText = binding.fastThresholdEditText.text?.toString()?.trim().orEmpty()
+        val slowText = binding.slowThresholdEditText.text?.toString()?.trim().orEmpty()
         
         prefs.edit()
             .putString(PREF_AZIMUTH, azText)
             .putString(PREF_DISTANCE, distText)
             .putString(PREF_TARGET_TIME, timeText)
+            .putString(PREF_FAST_THRESHOLD, fastText)
+            .putString(PREF_SLOW_THRESHOLD, slowText)
             .apply()
     }
 
@@ -260,6 +281,10 @@ class MainActivity : AppCompatActivity() {
         vTarget: Double,
         vStdDev: Double
     ) {
+        // Get threshold values from UI
+        val fastThreshold = binding.fastThresholdEditText.text?.toString()?.toDoubleOrNull() ?: DEFAULT_FAST_THRESHOLD.toDouble()
+        val slowThreshold = binding.slowThresholdEditText.text?.toString()?.toDoubleOrNull() ?: DEFAULT_SLOW_THRESHOLD.toDouble()
+        
         // Launch full-screen ChartActivity instead of dialog
         val intent = Intent(this, ChartActivity::class.java).apply {
             putExtra(ChartActivity.EXTRA_STATUS, status)
@@ -270,6 +295,8 @@ class MainActivity : AppCompatActivity() {
             putExtra(ChartActivity.EXTRA_VELOCITIES, velocities)
             putExtra(ChartActivity.EXTRA_V_TARGET, vTarget)
             putExtra(ChartActivity.EXTRA_V_STDDEV, vStdDev)
+            putExtra(ChartActivity.EXTRA_FAST_THRESHOLD_PCT, fastThreshold)
+            putExtra(ChartActivity.EXTRA_SLOW_THRESHOLD_PCT, slowThreshold)
         }
         startActivity(intent)
     }

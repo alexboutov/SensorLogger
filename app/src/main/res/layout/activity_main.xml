@@ -53,11 +53,58 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:inputType="numberDecimal"
-            android:imeOptions="actionDone"
+            android:imeOptions="actionNext"
             android:maxLines="1"
             android:singleLine="true"
             android:hint="e.g., 10.0" />
     </com.google.android.material.textfield.TextInputLayout>
+
+    <!-- Threshold row: FAST and SLOW side by side -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:layout_marginTop="12dp">
+
+        <!-- FAST threshold (% faster than target velocity) -->
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/fastThresholdInputLayout"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginEnd="6dp"
+            android:hint="FAST (% above avg)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/fastThresholdEditText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="numberDecimal"
+                android:imeOptions="actionNext"
+                android:maxLines="1"
+                android:singleLine="true"
+                android:hint="e.g., 20" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+        <!-- SLOW threshold (% slower than target velocity) -->
+        <com.google.android.material.textfield.TextInputLayout
+            android:id="@+id/slowThresholdInputLayout"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:layout_marginStart="6dp"
+            android:hint="SLOW (% below avg)">
+            <com.google.android.material.textfield.TextInputEditText
+                android:id="@+id/slowThresholdEditText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:inputType="numberDecimal"
+                android:imeOptions="actionDone"
+                android:maxLines="1"
+                android:singleLine="true"
+                android:hint="e.g., 15" />
+        </com.google.android.material.textfield.TextInputLayout>
+
+    </LinearLayout>
 
     <!-- Single START/STOP toggle button -->
     <Button

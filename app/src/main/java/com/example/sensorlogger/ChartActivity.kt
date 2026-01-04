@@ -25,6 +25,8 @@ class ChartActivity : AppCompatActivity() {
         const val EXTRA_VELOCITIES = "chart_velocities"
         const val EXTRA_V_TARGET = "chart_v_target"
         const val EXTRA_V_STDDEV = "chart_v_stddev"
+        const val EXTRA_FAST_THRESHOLD_PCT = "chart_fast_threshold_pct"
+        const val EXTRA_SLOW_THRESHOLD_PCT = "chart_slow_threshold_pct"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -45,11 +47,13 @@ class ChartActivity : AppCompatActivity() {
         val velocities = intent.getDoubleArrayExtra(EXTRA_VELOCITIES) ?: doubleArrayOf()
         val vTarget = intent.getDoubleExtra(EXTRA_V_TARGET, 1.372)
         val vStdDev = intent.getDoubleExtra(EXTRA_V_STDDEV, 0.2)
+        val fastThresholdPct = intent.getDoubleExtra(EXTRA_FAST_THRESHOLD_PCT, 20.0)
+        val slowThresholdPct = intent.getDoubleExtra(EXTRA_SLOW_THRESHOLD_PCT, 15.0)
         
         // Set the chart view as content
         val chartView = VelocityChartView(
             this, status, times, velocities, vTarget, vStdDev, 
-            distance, targetTime, detectedTime
+            distance, targetTime, detectedTime, fastThresholdPct, slowThresholdPct
         )
         setContentView(chartView)
         
@@ -74,12 +78,35 @@ class ChartActivity : AppCompatActivity() {
         private val vStdDev: Double,
         private val distance: Double,
         private val targetTime: Double,
-        private val detectedTime: Double
+        private val detectedTime: Double,
+        private val fastThresholdPct: Double,
+        private val slowThresholdPct: Double
     ) : View(context) {
         
-        private val linePaint = Paint().apply {
+        // Calculate threshold velocities
+        private val vFast = vTarget * (1.0 + fastThresholdPct / 100.0)
+        private val vSlow = vTarget * (1.0 - slowThresholdPct / 100.0)
+        
+        private val lineNormalPaint = Paint().apply {
             color = Color.BLUE
             strokeWidth = 4f
+            style = Paint.Style.STROKE
+            isAntiAlias = true
+        }
+        
+        private val lineFastPaint = Paint().apply {
+            // color = Color.parseColor("#00FF00")  // Pure green
+            // color = Color.parseColor("#ADFF2F")  // Lemon green (GreenYellow)
+            color = Color.parseColor("#228B22")  // Forest green
+            // color = Color.parseColor("#32CD32")  // Lime green
+            strokeWidth = 5f
+            style = Paint.Style.STROKE
+            isAntiAlias = true
+        }
+        
+        private val lineSlowPaint = Paint().apply {
+            color = Color.RED
+            strokeWidth = 5f
             style = Paint.Style.STROKE
             isAntiAlias = true
         }
@@ -91,7 +118,7 @@ class ChartActivity : AppCompatActivity() {
             isAntiAlias = true
         }
         
-        private val sigmaPaint = Paint().apply {
+        private val thresholdPaint = Paint().apply {
             color = Color.parseColor("#FFA500")  // Orange
             strokeWidth = 2f
             style = Paint.Style.STROKE
@@ -183,6 +210,20 @@ class ChartActivity : AppCompatActivity() {
             style = Paint.Style.FILL
         }
         
+        private val targetLabelPaint = Paint().apply {
+            color = Color.parseColor("#228B22")  // Same green as target line
+            textSize = 32f
+            isAntiAlias = true
+            textAlign = Paint.Align.RIGHT
+        }
+        
+        private val thresholdLabelPaint = Paint().apply {
+            color = Color.parseColor("#FFA500")  // Same orange as threshold lines
+            textSize = 32f
+            isAntiAlias = true
+            textAlign = Paint.Align.LEFT
+        }
+        
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
             
@@ -192,9 +233,10 @@ class ChartActivity : AppCompatActivity() {
             if (times.isEmpty() || velocities.isEmpty()) return
             
             val padding = 100f
+            val leftPadding = 130f  // More space for left labels
             val topPadding = 160f  // Extra space for title
             val bottomPadding = 60f  // Space for hint text
-            val chartWidth = width - 2 * padding
+            val chartWidth = width - leftPadding - padding
             val chartHeight = height - topPadding - padding - bottomPadding
             
             // Determine success/failure
@@ -208,16 +250,16 @@ class ChartActivity : AppCompatActivity() {
             
             // Draw title and info based on status
             if (isSuccess) {
-                canvas.drawText("PACE ACHIEVED!", padding, 55f, titlePaint)
+                canvas.drawText("PACE ACHIEVED!", leftPadding, 55f, titlePaint)
             } else {
                 val failureType = if (status == "TOO_FAST") "TOO FAST" else "TOO SLOW"
-                canvas.drawText(failureType, padding, 55f, failureTitlePaint)
+                canvas.drawText(failureType, leftPadding, 55f, failureTitlePaint)
             }
             
             // Draw time info: "Time: 9.12s (Target: 10.00s)" - two decimal places
             val timeInfoPaint = if (isSuccess) timePaint else timePaintFailure
             val timeStr = String.format("Time: %.2fs  (Target: %.2fs)", detectedTime, targetTime)
-            canvas.drawText(timeStr, padding, 115f, timeInfoPaint)
+            canvas.drawText(timeStr, leftPadding, 115f, timeInfoPaint)
             
             // Draw percentage deviation (right side of header)
             val percentStr = String.format("%+.1f%%", timeDeviationPercent)
@@ -227,68 +269,76 @@ class ChartActivity : AppCompatActivity() {
             
             // Calculate scales
             val tMax = times.maxOrNull() ?: 1.0
-            val vMin = (vTarget - 2.5 * vStdDev).coerceAtMost(velocities.minOrNull() ?: 0.0)
-            val vMax = (vTarget + 2.5 * vStdDev).coerceAtLeast(velocities.maxOrNull() ?: 2.0)
+            val vMin = (vSlow * 0.85).coerceAtMost(velocities.minOrNull() ?: 0.0)
+            val vMax = (vFast * 1.15).coerceAtLeast(velocities.maxOrNull() ?: 2.0)
             val vRange = vMax - vMin
             
-            fun xPos(t: Double) = padding + (t / tMax * chartWidth).toFloat()
+            fun xPos(t: Double) = leftPadding + (t / tMax * chartWidth).toFloat()
             fun yPos(v: Double) = topPadding + chartHeight - ((v - vMin) / vRange * chartHeight).toFloat()
             
-            // Draw ±1σ band
+            // Draw velocity tunnel band (between FAST and SLOW)
             val bandPath = Path()
-            bandPath.moveTo(xPos(0.0), yPos(vTarget + vStdDev))
-            bandPath.lineTo(xPos(tMax), yPos(vTarget + vStdDev))
-            bandPath.lineTo(xPos(tMax), yPos(vTarget - vStdDev))
-            bandPath.lineTo(xPos(0.0), yPos(vTarget - vStdDev))
+            bandPath.moveTo(xPos(0.0), yPos(vFast))
+            bandPath.lineTo(xPos(tMax), yPos(vFast))
+            bandPath.lineTo(xPos(tMax), yPos(vSlow))
+            bandPath.lineTo(xPos(0.0), yPos(vSlow))
             bandPath.close()
             canvas.drawPath(bandPath, bandPaint)
             
             // Draw grid
             for (i in 0..4) {
                 val y = topPadding + chartHeight * i / 4
-                canvas.drawLine(padding, y, padding + chartWidth, y, gridPaint)
+                canvas.drawLine(leftPadding, y, leftPadding + chartWidth, y, gridPaint)
             }
             for (i in 0..5) {
-                val x = padding + chartWidth * i / 5
+                val x = leftPadding + chartWidth * i / 5
                 canvas.drawLine(x, topPadding, x, topPadding + chartHeight, gridPaint)
             }
             
-            // Draw target line
+            // Draw target line (green)
             canvas.drawLine(xPos(0.0), yPos(vTarget), xPos(tMax), yPos(vTarget), targetPaint)
             
-            // Draw ±1σ lines
-            canvas.drawLine(xPos(0.0), yPos(vTarget + vStdDev), xPos(tMax), yPos(vTarget + vStdDev), sigmaPaint)
-            canvas.drawLine(xPos(0.0), yPos(vTarget - vStdDev), xPos(tMax), yPos(vTarget - vStdDev), sigmaPaint)
+            // Draw FAST and SLOW threshold lines (orange dashed)
+            canvas.drawLine(xPos(0.0), yPos(vFast), xPos(tMax), yPos(vFast), thresholdPaint)
+            canvas.drawLine(xPos(0.0), yPos(vSlow), xPos(tMax), yPos(vSlow), thresholdPaint)
             
-            // Draw velocity line
-            val path = Path()
-            path.moveTo(xPos(times[0]), yPos(velocities[0]))
+            // Draw velocity line with color changes based on thresholds
             for (i in 1 until times.size) {
-                path.lineTo(xPos(times[i]), yPos(velocities[i]))
+                val v1 = velocities[i - 1]
+                val v2 = velocities[i]
+                val avgV = (v1 + v2) / 2
+                
+                val segmentPaint = when {
+                    avgV > vFast -> lineFastPaint    // Above FAST threshold -> lemon green
+                    avgV < vSlow -> lineSlowPaint    // Below SLOW threshold -> red
+                    else -> lineNormalPaint          // In tunnel -> blue
+                }
+                
+                canvas.drawLine(xPos(times[i-1]), yPos(v1), xPos(times[i]), yPos(v2), segmentPaint)
             }
-            canvas.drawPath(path, linePaint)
             
             // Draw axis labels
             textPaint.textSize = 36f
             textPaint.color = Color.BLACK
-            canvas.drawText("Time (s)", padding + chartWidth / 2 - 60, height - 20f, textPaint)
-            canvas.drawText("0", padding - 15, topPadding + chartHeight + 40, textPaint)
-            canvas.drawText(String.format("%.1f", tMax), padding + chartWidth - 40, topPadding + chartHeight + 40, textPaint)
+            canvas.drawText("Time (s)", leftPadding + chartWidth / 2 - 60, height - 20f, textPaint)
+            canvas.drawText("0", leftPadding - 15, topPadding + chartHeight + 40, textPaint)
+            canvas.drawText(String.format("%.1f", tMax), leftPadding + chartWidth - 40, topPadding + chartHeight + 40, textPaint)
             
-            // Velocity labels
-            textPaint.textSize = 32f
-            canvas.drawText(String.format("%.2f", vTarget), padding - 90, yPos(vTarget) + 10, textPaint)
-            textPaint.color = Color.parseColor("#FFA500")
-            canvas.drawText("+1σ", padding + chartWidth + 15, yPos(vTarget + vStdDev) + 10, textPaint)
-            canvas.drawText("-1σ", padding + chartWidth + 15, yPos(vTarget - vStdDev) + 10, textPaint)
+            // Left side velocity labels
+            // Target velocity in green
+            canvas.drawText(String.format("%.2f", vTarget), leftPadding - 10, yPos(vTarget) + 10, targetLabelPaint)
+            
+            // Right side labels: FAST and SLOW in orange
+            canvas.drawText("FAST", leftPadding + chartWidth + 15, yPos(vFast) + 10, thresholdLabelPaint)
+            canvas.drawText("SLOW", leftPadding + chartWidth + 15, yPos(vSlow) + 10, thresholdLabelPaint)
             
             // Draw failure overlay if not successful
             if (!isSuccess) {
                 // Semi-transparent overlay on chart area
-                canvas.drawRect(padding, topPadding, padding + chartWidth, topPadding + chartHeight, failureOverlayPaint)
+                canvas.drawRect(leftPadding, topPadding, leftPadding + chartWidth, topPadding + chartHeight, failureOverlayPaint)
                 
                 // Failure message in center of chart
-                val centerX = padding + chartWidth / 2
+                val centerX = leftPadding + chartWidth / 2
                 val centerY = topPadding + chartHeight / 2
                 canvas.drawText("Repeat swim", centerX, centerY, failureTextPaint)
             }
