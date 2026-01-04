@@ -471,16 +471,16 @@ class SensorLoggerService : Service(), SensorEventListener {
                         latestP_accGM = 0.0
 
                         if (haveGM) {
-                            // GM -> world (use R^T)
-                            val accWorldX_gm = rotMatrixGM[0]*laX + rotMatrixGM[3]*laY + rotMatrixGM[6]*laZ
-                            val accWorldY_gm = rotMatrixGM[1]*laX + rotMatrixGM[4]*laY + rotMatrixGM[7]*laZ
+                            // GM -> world (R * device_vector, row-major access)
+                            val accWorldX_gm = rotMatrixGM[0]*laX + rotMatrixGM[1]*laY + rotMatrixGM[2]*laZ
+                            val accWorldY_gm = rotMatrixGM[3]*laX + rotMatrixGM[4]*laY + rotMatrixGM[5]*laZ
                             latestP_gm = accWorldX_gm * dirFx + accWorldY_gm * dirFy
                         }
 
                         if (haveRV) {
-                            // RV -> world (use R^T)
-                            val accWorldX_rv = rotMatrixRV[0]*laX + rotMatrixRV[3]*laY + rotMatrixRV[6]*laZ
-                            val accWorldY_rv = rotMatrixRV[1]*laX + rotMatrixRV[4]*laY + rotMatrixRV[7]*laZ
+                            // RV -> world (R * device_vector, row-major access)
+                            val accWorldX_rv = rotMatrixRV[0]*laX + rotMatrixRV[1]*laY + rotMatrixRV[2]*laZ
+                            val accWorldY_rv = rotMatrixRV[3]*laX + rotMatrixRV[4]*laY + rotMatrixRV[5]*laZ
                             latestP_rv = accWorldX_rv * dirFx + accWorldY_rv * dirFy
                         }
 
@@ -494,8 +494,8 @@ class SensorLoggerService : Service(), SensorEventListener {
                             val linDevY = ay - gravity[1]
                             val linDevZ = az - gravity[2]
 
-                            val linWorldX = rotMatrixGM[0]*linDevX + rotMatrixGM[3]*linDevY + rotMatrixGM[6]*linDevZ // East
-                            val linWorldY = rotMatrixGM[1]*linDevX + rotMatrixGM[4]*linDevY + rotMatrixGM[7]*linDevZ // North
+                            val linWorldX = rotMatrixGM[0]*linDevX + rotMatrixGM[1]*linDevY + rotMatrixGM[2]*linDevZ // East
+                            val linWorldY = rotMatrixGM[3]*linDevX + rotMatrixGM[4]*linDevY + rotMatrixGM[5]*linDevZ // North
                             latestP_accGM = linWorldX * dirFx + linWorldY * dirFy
                         }
 
