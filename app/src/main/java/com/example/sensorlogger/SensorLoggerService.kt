@@ -123,7 +123,9 @@ class SensorLoggerService : Service(), SensorEventListener {
         val gyroSpanMs_pred: Double? = null,
         val yawDeg_pred: Double? = null,
         val pitchDeg_pred: Double? = null,
-        val rollDeg_pred: Double? = null
+        val rollDeg_pred: Double? = null,
+        val vCorrRT: Double? = null,
+        val vCorrRTFiltered: Double? = null
     )
 
     // ==============================
@@ -179,6 +181,18 @@ class SensorLoggerService : Service(), SensorEventListener {
     private val engineLA = ProjectionEngineORI(PRED_WINDOW_SEC)
 
     private var vAccum_pred: Double = 0.0
+
+    // Real-time velocity correction variables
+    private var vRawSampleCount = 0L   // Count of V_raw samples during walking
+    private var vRawSum = 0.0          // Running sum of V_raw (vAccum_gm)
+    private var vAvgKnownRT = 1.372    // V_avg from declared pace (set from UI on start)
+    
+    // DC-blocking high-pass filter for drift removal (minimal phase shift)
+    // y[n] = α * (y[n-1] + x[n] - x[n-1])
+    // α = 0.995 → cutoff ~0.15 Hz at 200 Hz, removes drift while preserving walking signal
+    private val DC_BLOCK_ALPHA = 0.995
+    private var dcBlockPrevInput = 0.0   // x[n-1]
+    private var dcBlockPrevOutput = 0.0  // y[n-1]
 
     // Telemetry placeholders (optional class-level mirrors)
     private var lastOriTsUsed: Long = 0L
@@ -277,6 +291,16 @@ class SensorLoggerService : Service(), SensorEventListener {
         vAccum_rv = 0.0
         vAccum_accGM = 0.0
         vAccum_pred = 0.0
+        
+        // Reset real-time correction variables
+        vRawSampleCount = 0L
+        vRawSum = 0.0
+        vAvgKnownRT = DIST_METERS / TARGET_TIME_SEC  // Calculate from UI settings
+        
+        // Reset DC-block filter state
+        dcBlockPrevInput = 0.0
+        dcBlockPrevOutput = 0.0
+        
         prevLaTsNs = 0L
         laClockSec = 0.0
 
@@ -391,7 +415,6 @@ class SensorLoggerService : Service(), SensorEventListener {
         if (!isLogging) return
 
         val sensorType = event.sensor.type
-        val sysTimestamp = System.currentTimeMillis()
         val sensorTsNs = event.timestamp
         val values = event.values.copyOf()
 
@@ -521,6 +544,24 @@ class SensorLoggerService : Service(), SensorEventListener {
                             if (haveRV) vAccum_rv += dtSec * latestP_rv
                             if (!latestP_accGM.isNaN()) vAccum_accGM += dtSec * latestP_accGM
                         }
+                        
+                        // ===== Real-time corrected velocity =====
+                        var vCorrRT = 0.0
+                        var vCorrRTFiltered = 0.0
+                        if (haveGM) {
+                            vRawSampleCount++
+                            vRawSum += vAccum_gm
+                            val vRawMeanRunning = if (vRawSampleCount > 0) vRawSum / vRawSampleCount else 0.0
+                            vCorrRT = vAvgKnownRT + (vAccum_gm - vRawMeanRunning)
+                            
+                            // Apply DC-blocking high-pass filter to remove residual drift
+                            // Formula: y[n] = α * (y[n-1] + x[n] - x[n-1])
+                            val vInput = vCorrRT - vAvgKnownRT  // Center around zero for filtering
+                            vCorrRTFiltered = DC_BLOCK_ALPHA * (dcBlockPrevOutput + vInput - dcBlockPrevInput)
+                            dcBlockPrevInput = vInput
+                            dcBlockPrevOutput = vCorrRTFiltered
+                            vCorrRTFiltered += vAvgKnownRT  // Add back the target average
+                        }
 
                         // ======== Flags ========
                         val flagOriStaleGM = if (haveGM && !oriAgeGM.isNaN()) (oriAgeGM > ORI_STALE_SEC) else null
@@ -620,7 +661,9 @@ class SensorLoggerService : Service(), SensorEventListener {
                             gyroSpanMs_pred = local_gyroSpan,
                             yawDeg_pred = local_yaw,
                             pitchDeg_pred = local_pitch,
-                            rollDeg_pred = local_roll
+                            rollDeg_pred = local_roll,
+                            vCorrRT = if (haveGM) vCorrRT else null,
+                            vCorrRTFiltered = if (haveGM) vCorrRTFiltered else null
                         )
                         pendingRows.addLast(row)
 
@@ -882,6 +925,8 @@ class SensorLoggerService : Service(), SensorEventListener {
                 append(","); if (r.yawDeg_pred != null) append(String.format(Locale.US, "%.1f", r.yawDeg_pred)) else append("")
                 append(","); if (r.pitchDeg_pred != null) append(String.format(Locale.US, "%.1f", r.pitchDeg_pred)) else append("")
                 append(","); if (r.rollDeg_pred != null) append(String.format(Locale.US, "%.1f", r.rollDeg_pred)) else append("")
+                append(","); if (r.vCorrRT != null) append(String.format(Locale.US, "%.3f", r.vCorrRT)) else append("")
+                append(","); if (r.vCorrRTFiltered != null) append(String.format(Locale.US, "%.3f", r.vCorrRTFiltered)) else append("")
 
                 append("\n")
             }
@@ -938,7 +983,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                                 "Pgm_smooth,Prv_smooth,PaccGM_smooth," +
                                 "Vgm_smooth,Sgm_smooth,Vrv_smooth,Srv_smooth,VaccGM_smooth,SaccGM_smooth," +
                                 "isOriStaleGM,isOriStaleRV,isAccStale,isLaSat,isLaJump,isPgmOutlier,isPrvOutlier,isGravAnom,isMagAnom," +
-                                "P_pred,V_pred,oriTsNsUsed,oriAgeSec_pred,gyroSpanMs_pred,yawDeg_pred,pitchDeg_pred,rollDeg_pred\n"
+                                "P_pred,V_pred,oriTsNsUsed,oriAgeSec_pred,gyroSpanMs_pred,yawDeg_pred,pitchDeg_pred,rollDeg_pred,V_corr_rt,V_corr_rt_filt\n"
                     else -> "timestamp,val0,val1,val2\n"
                 }
                 writer.write(header)
@@ -1137,6 +1182,44 @@ class SensorLoggerService : Service(), SensorEventListener {
     }
 
     // ==============================
+    // Zero-phase high-pass filter (no time shift)
+    // Implements forward-backward Butterworth filter
+    // ==============================
+    private fun zeroPhaseHighPass(data: DoubleArray, cutoffHz: Double, sampleRateHz: Double): DoubleArray {
+        if (data.size < 12) return data  // Need minimum samples for filtering
+        
+        // 2nd order Butterworth high-pass coefficients
+        val omega = kotlin.math.tan(kotlin.math.PI * cutoffHz / sampleRateHz)
+        val omega2 = omega * omega
+        val sqrt2 = kotlin.math.sqrt(2.0)
+        val denom = 1.0 + sqrt2 * omega + omega2
+        
+        val b0 = 1.0 / denom
+        val b1 = -2.0 / denom
+        val b2 = 1.0 / denom
+        val a1 = 2.0 * (omega2 - 1.0) / denom
+        val a2 = (1.0 - sqrt2 * omega + omega2) / denom
+        
+        // Forward pass
+        val forward = DoubleArray(data.size)
+        forward[0] = data[0]
+        forward[1] = data[1]
+        for (i in 2 until data.size) {
+            forward[i] = b0 * data[i] + b1 * data[i-1] + b2 * data[i-2] - a1 * forward[i-1] - a2 * forward[i-2]
+        }
+        
+        // Backward pass (reverse, filter, reverse again)
+        val backward = DoubleArray(data.size)
+        backward[data.size - 1] = forward[data.size - 1]
+        backward[data.size - 2] = forward[data.size - 2]
+        for (i in (data.size - 3) downTo 0) {
+            backward[i] = b0 * forward[i] + b1 * forward[i+1] + b2 * forward[i+2] - a1 * backward[i+1] - a2 * backward[i+2]
+        }
+        
+        return backward
+    }
+
+    // ==============================
     // Post-processing: Constrained-time velocity correction
     // ==============================
     private fun postProcessVelocityCorrection(
@@ -1265,12 +1348,29 @@ class SensorLoggerService : Service(), SensorEventListener {
         val chartVelocities = DoubleArray(chartTimes.size)
         val chartStartTime = walkingData.firstOrNull()?.t ?: 0.0
         
+        // First pass: compute unfiltered V_corr
         for (i in chartTimes.indices) {
             val srcIdx = (i * step).coerceAtMost(walkingData.size - 1)
             chartTimes[i] = walkingData[srcIdx].t - chartStartTime  // Normalize to start at 0
             chartVelocities[i] = vAvgKnown + (walkingData[srcIdx].v - vMean)
         }
         
+        // Apply zero-phase high-pass filter to remove drift from chart display
+        if (chartVelocities.size >= 12) {
+            val sampleRateChart = if (chartTimes.size > 1 && chartTimes.last() > 0) {
+                (chartTimes.size - 1) / chartTimes.last()
+            } else 200.0
+            
+            // Center, filter, then restore offset
+            val chartCentered = DoubleArray(chartVelocities.size) { chartVelocities[it] - vAvgKnown }
+            val chartFiltered = zeroPhaseHighPass(chartCentered, 0.15, sampleRateChart)
+            for (i in chartVelocities.indices) {
+                chartVelocities[i] = vAvgKnown + chartFiltered[i]
+            }
+        }
+        
+        // Calculate velocity std dev for ±σ bands
+        // val vCorrValues = walkingData.map { vAvgKnown + (it.v - vMean) }
         // Calculate velocity std dev for ±σ bands
         val vCorrValues = walkingData.map { vAvgKnown + (it.v - vMean) }
         val vStdDev = kotlin.math.sqrt(vCorrValues.map { (it - vAvgKnown) * (it - vAvgKnown) }.average())
@@ -1292,6 +1392,33 @@ class SensorLoggerService : Service(), SensorEventListener {
         android.util.Log.d("SensorLogger", 
             "Velocity correction: V_avg_target=${String.format(java.util.Locale.US, "%.3f", vAvgKnown)} m/s, V_raw_mean=${String.format(java.util.Locale.US, "%.3f", vMean)} m/s, correction=${String.format(java.util.Locale.US, "%.3f", vAvgKnown - vMean)} m/s")
 
+        // Compute zero-phase filtered V_corr for the walking phase
+        val vCorrArray = DoubleArray(dataRows.size) { i ->
+            if (i in walkStartIdx..walkEndIdx) {
+                vAvgKnown + (dataRows[i].v - vMean)
+            } else {
+                dataRows[i].v
+            }
+        }
+        
+        // Extract walking phase for filtering
+        val walkVCorr = vCorrArray.slice(walkStartIdx..walkEndIdx).toDoubleArray()
+        val sampleRate = if (detectedDuration > 0) walkingData.size / detectedDuration else 200.0
+        
+        // Apply zero-phase high-pass filter (0.15 Hz cutoff) to remove drift
+        val walkVCorrCentered = DoubleArray(walkVCorr.size) { walkVCorr[it] - vAvgKnown }
+        val walkVCorrFiltered = zeroPhaseHighPass(walkVCorrCentered, 0.15, sampleRate)
+        
+        // Reconstruct full array with filtered values
+        val vCorrFiltered = DoubleArray(dataRows.size) { i ->
+            if (i in walkStartIdx..walkEndIdx) {
+                val walkIdx = i - walkStartIdx
+                vAvgKnown + walkVCorrFiltered[walkIdx]
+            } else {
+                vCorrArray[i]
+            }
+        }
+        
         // Second pass: rewrite file with corrected velocities
         val tmpFile = File(laFile.parentFile, laFile.nameWithoutExtension + "_vcorr.csv")
         var rowIndex = 0
@@ -1300,7 +1427,7 @@ class SensorLoggerService : Service(), SensorEventListener {
         laFile.bufferedReader().use { br ->
             tmpFile.bufferedWriter().use { bw ->
                 // Write header with new columns
-                val newHeader = header + ",V_corr,V_rv_corr,V_pred_corr,V_avg_known,walk_phase,pace_valid\n"
+                val newHeader = header + ",V_corr,V_corr_filt,V_rv_corr,V_pred_corr,V_avg_known,walk_phase,pace_valid\n"
                 bw.write(newHeader)
 
                 br.readLine() // skip original header
@@ -1324,6 +1451,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                         
                         // Only apply correction during walking phase
                         val vCorr = if (inWalkPhase) vAvgKnown + (d.v - vMean) else d.v
+                        val vCorrFilt = if (inWalkPhase && rowIndex < vCorrFiltered.size) vCorrFiltered[rowIndex] else vCorr
                         val vrvCorr = if (inWalkPhase && d.vrv != null && vrvMean != null) 
                             vAvgKnown + (d.vrv - vrvMean) else d.vrv
                         val vpredCorr = if (inWalkPhase && d.vpred != null && vpredMean != null) 
@@ -1331,6 +1459,8 @@ class SensorLoggerService : Service(), SensorEventListener {
 
                         bw.write(",")
                         bw.write(String.format(java.util.Locale.US, "%.3f", vCorr))
+                        bw.write(",")
+                        bw.write(String.format(java.util.Locale.US, "%.3f", vCorrFilt))
                         bw.write(",")
                         if (vrvCorr != null) bw.write(String.format(java.util.Locale.US, "%.3f", vrvCorr))
                         bw.write(",")

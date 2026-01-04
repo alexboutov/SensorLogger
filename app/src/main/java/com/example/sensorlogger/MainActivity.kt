@@ -9,6 +9,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.os.Build
+import android.content.pm.ActivityInfo
 import android.os.Bundle
 import android.view.View
 import android.view.WindowManager
@@ -218,11 +219,11 @@ class MainActivity : AppCompatActivity() {
         vTarget: Double,
         vStdDev: Double
     ) {
-        if (status == "VALID" && chartTimes != null && chartVelocities != null && chartTimes.isNotEmpty()) {
-            // Show velocity chart for successful pace
-            showVelocityChart(distance, targetTime, detectedTime, chartTimes, chartVelocities, vTarget, vStdDev)
+        if (chartTimes != null && chartVelocities != null && chartTimes.isNotEmpty()) {
+            // Always show velocity chart (with failure overlay if needed)
+            showVelocityChart(status, distance, targetTime, detectedTime, chartTimes, chartVelocities, vTarget, vStdDev)
         } else {
-            // Show simple dialog for failed pace
+            // Fallback to simple dialog if no chart data
             showFailureDialog(status, targetTime, detectedTime)
         }
     }
@@ -250,6 +251,7 @@ class MainActivity : AppCompatActivity() {
     }
     
     private fun showVelocityChart(
+        status: String,
         distance: Double,
         targetTime: Double,
         detectedTime: Double,
@@ -258,17 +260,20 @@ class MainActivity : AppCompatActivity() {
         vTarget: Double,
         vStdDev: Double
     ) {
-        val chartView = VelocityChartView(this, times, velocities, vTarget, vStdDev, distance, detectedTime)
+        val chartView = VelocityChartView(this, status, times, velocities, vTarget, vStdDev, distance, targetTime, detectedTime)
         
         val dialog = AlertDialog.Builder(this)
             .setView(chartView)
             .setPositiveButton("OK", null)
             .create()
         
-        dialog.window?.setLayout(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.WRAP_CONTENT
-        )
+        // Make dialog wider
+        dialog.setOnShowListener {
+            dialog.window?.setLayout(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.WRAP_CONTENT
+            )
+        }
         
         dialog.show()
     }
@@ -276,11 +281,13 @@ class MainActivity : AppCompatActivity() {
     // Custom View for velocity chart
     private inner class VelocityChartView(
         context: Context,
+        private val status: String,
         private val times: DoubleArray,
         private val velocities: DoubleArray,
         private val vTarget: Double,
         private val vStdDev: Double,
         private val distance: Double,
+        private val targetTime: Double,
         private val detectedTime: Double
     ) : View(context) {
         
@@ -322,6 +329,26 @@ class MainActivity : AppCompatActivity() {
             textSize = 48f
             isAntiAlias = true
             isFakeBoldText = true
+        }
+        
+        private val failureTitlePaint = Paint().apply {
+            color = Color.RED
+            textSize = 48f
+            isAntiAlias = true
+            isFakeBoldText = true
+        }
+        
+        private val failureOverlayPaint = Paint().apply {
+            color = Color.argb(64, 255, 0, 0)  // 25% opacity red
+            style = Paint.Style.FILL
+        }
+        
+        private val failureTextPaint = Paint().apply {
+            color = Color.RED
+            textSize = 42f
+            isAntiAlias = true
+            isFakeBoldText = true
+            textAlign = Paint.Align.CENTER
         }
         
         private val distancePaint = Paint().apply {
@@ -412,6 +439,20 @@ class MainActivity : AppCompatActivity() {
             textPaint.color = Color.parseColor("#FFA500")
             canvas.drawText("+1σ", padding + chartWidth + 10, yPos(vTarget + vStdDev) + 10, textPaint)
             canvas.drawText("-1σ", padding + chartWidth + 10, yPos(vTarget - vStdDev) + 10, textPaint)
+            
+            // Draw failure overlay if not successful
+            val isSuccess = status == "VALID"
+            if (!isSuccess) {
+                // Semi-transparent overlay on chart area
+                canvas.drawRect(padding, topPadding, padding + chartWidth, topPadding + chartHeight, failureOverlayPaint)
+                
+                // Failure message in center of chart
+                val centerX = padding + chartWidth / 2
+                val centerY = topPadding + chartHeight / 2
+                canvas.drawText("Failed to make target", centerX, centerY - 20f, failureTextPaint)
+                val targetTimeStr = String.format("%.1f", targetTime)
+                canvas.drawText("time of $targetTimeStr seconds", centerX, centerY + 30f, failureTextPaint)
+            }
         }
     }
 }
