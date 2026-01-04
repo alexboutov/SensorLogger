@@ -22,6 +22,13 @@
     		</intent-filter>
 	</activity>
 
+    <activity
+        android:name=".ChartActivity"
+            android:exported="false"
+            android:screenOrientation="sensor"
+            android:theme="@style/Theme.AppCompat.Light.NoActionBar">
+        </activity>
+
         <service
             android:name=".SensorLoggerService"
             android:enabled="true"

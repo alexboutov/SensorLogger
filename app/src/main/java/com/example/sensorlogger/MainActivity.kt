@@ -260,22 +260,18 @@ class MainActivity : AppCompatActivity() {
         vTarget: Double,
         vStdDev: Double
     ) {
-        val chartView = VelocityChartView(this, status, times, velocities, vTarget, vStdDev, distance, targetTime, detectedTime)
-        
-        val dialog = AlertDialog.Builder(this)
-            .setView(chartView)
-            .setPositiveButton("OK", null)
-            .create()
-        
-        // Make dialog wider
-        dialog.setOnShowListener {
-            dialog.window?.setLayout(
-                WindowManager.LayoutParams.MATCH_PARENT,
-                WindowManager.LayoutParams.WRAP_CONTENT
-            )
+        // Launch full-screen ChartActivity instead of dialog
+        val intent = Intent(this, ChartActivity::class.java).apply {
+            putExtra(ChartActivity.EXTRA_STATUS, status)
+            putExtra(ChartActivity.EXTRA_DISTANCE, distance)
+            putExtra(ChartActivity.EXTRA_TARGET_TIME, targetTime)
+            putExtra(ChartActivity.EXTRA_DETECTED_TIME, detectedTime)
+            putExtra(ChartActivity.EXTRA_TIMES, times)
+            putExtra(ChartActivity.EXTRA_VELOCITIES, velocities)
+            putExtra(ChartActivity.EXTRA_V_TARGET, vTarget)
+            putExtra(ChartActivity.EXTRA_V_STDDEV, vStdDev)
         }
-        
-        dialog.show()
+        startActivity(intent)
     }
     
     // Custom View for velocity chart
