@@ -54,7 +54,9 @@ class SensorLoggerService : Service(), SensorEventListener {
     private val WINDOW_SIZE = 2 * N_SMOOTH + 1
 
     // Post-processing config
-    private val DIST_METERS = 20.0               // assumed known distance per test
+    private var DIST_METERS = 13.716             // distance in meters (set from UI)
+    private var TARGET_TIME_SEC = 10.0           // target lap time in seconds (set from UI)
+    private val TIME_TOLERANCE_SEC = 1.0         // acceptable deviation from target
 
     // Gyro-prediction config (LA-triggered engine)
     private val PRED_WINDOW_SEC = 0.25           // keep ~250 ms of gyro/orientation history
@@ -195,6 +197,10 @@ class SensorLoggerService : Service(), SensorEventListener {
     private val ioScope = CoroutineScope(writeExecutor.asCoroutineDispatcher() + serviceJob + ioErrorHandler)
 
     @Volatile private var isLogging = false
+    
+    // Pace detection results (set during post-processing)
+    @Volatile private var lastPaceStatus: String = ""
+    @Volatile private var lastDetectedTime: Double = 0.0
     @Volatile private var writersOpen = false
 
     private lateinit var wakeLock: PowerManager.WakeLock
@@ -258,7 +264,13 @@ class SensorLoggerService : Service(), SensorEventListener {
         val azRad = Math.toRadians(azimuthDeg)
         dirFx = sin(azRad) // East
         dirFy = cos(azRad) // North
+        
+        // Read distance and target time from UI
+        DIST_METERS = intent?.getDoubleExtra(EXTRA_DISTANCE_METERS, 13.716) ?: 13.716
+        TARGET_TIME_SEC = intent?.getDoubleExtra(EXTRA_TARGET_TIME_SEC, 10.0) ?: 10.0
+        
         android.util.Log.d("SensorLogger", "UI azimuthDeg=$azimuthDeg°  dirFx=$dirFx dirFy=$dirFy")
+        android.util.Log.d("SensorLogger", "UI distance=${DIST_METERS}m  targetTime=${TARGET_TIME_SEC}s")
 
         // Reset state
         vAccum_gm = 0.0
@@ -308,6 +320,10 @@ class SensorLoggerService : Service(), SensorEventListener {
         // === Post-process: detrend velocities and rewrite LA CSV with new columns + footer ===
         runCatching { postProcessLaCsv(laCsvFile, DIST_METERS) }
             .onFailure { android.util.Log.e("SensorLogger", "post-process failed", it) }
+        
+        // === Post-process: constrained-time velocity correction ===
+        runCatching { postProcessVelocityCorrection(laCsvFile, DIST_METERS, TARGET_TIME_SEC, TIME_TOLERANCE_SEC) }
+            .onFailure { android.util.Log.e("SensorLogger", "velocity correction failed", it) }
 
         writersOpen = false
         releaseWakeLock()
@@ -471,16 +487,16 @@ class SensorLoggerService : Service(), SensorEventListener {
                         latestP_accGM = 0.0
 
                         if (haveGM) {
-                            // GM -> world (R * device_vector, row-major access)
-                            val accWorldX_gm = rotMatrixGM[0]*laX + rotMatrixGM[1]*laY + rotMatrixGM[2]*laZ
-                            val accWorldY_gm = rotMatrixGM[3]*laX + rotMatrixGM[4]*laY + rotMatrixGM[5]*laZ
+                            // GM -> world (use R^T for device->world transform)
+                            val accWorldX_gm = rotMatrixGM[0]*laX + rotMatrixGM[3]*laY + rotMatrixGM[6]*laZ
+                            val accWorldY_gm = rotMatrixGM[1]*laX + rotMatrixGM[4]*laY + rotMatrixGM[7]*laZ
                             latestP_gm = accWorldX_gm * dirFx + accWorldY_gm * dirFy
                         }
 
                         if (haveRV) {
-                            // RV -> world (R * device_vector, row-major access)
-                            val accWorldX_rv = rotMatrixRV[0]*laX + rotMatrixRV[1]*laY + rotMatrixRV[2]*laZ
-                            val accWorldY_rv = rotMatrixRV[3]*laX + rotMatrixRV[4]*laY + rotMatrixRV[5]*laZ
+                            // RV -> world (use R^T for device->world transform)
+                            val accWorldX_rv = rotMatrixRV[0]*laX + rotMatrixRV[3]*laY + rotMatrixRV[6]*laZ
+                            val accWorldY_rv = rotMatrixRV[1]*laX + rotMatrixRV[4]*laY + rotMatrixRV[7]*laZ
                             latestP_rv = accWorldX_rv * dirFx + accWorldY_rv * dirFy
                         }
 
@@ -494,8 +510,8 @@ class SensorLoggerService : Service(), SensorEventListener {
                             val linDevY = ay - gravity[1]
                             val linDevZ = az - gravity[2]
 
-                            val linWorldX = rotMatrixGM[0]*linDevX + rotMatrixGM[1]*linDevY + rotMatrixGM[2]*linDevZ // East
-                            val linWorldY = rotMatrixGM[3]*linDevX + rotMatrixGM[4]*linDevY + rotMatrixGM[5]*linDevZ // North
+                            val linWorldX = rotMatrixGM[0]*linDevX + rotMatrixGM[3]*linDevY + rotMatrixGM[6]*linDevZ // East
+                            val linWorldY = rotMatrixGM[1]*linDevX + rotMatrixGM[4]*linDevY + rotMatrixGM[7]*linDevZ // North
                             latestP_accGM = linWorldX * dirFx + linWorldY * dirFy
                         }
 
@@ -681,10 +697,10 @@ class SensorLoggerService : Service(), SensorEventListener {
                     Sensor.TYPE_ACCELEROMETER -> {
                         latestACC.ts = sensorTsNs
                         System.arraycopy(values, 0, latestACC.v, 0, 3)
-                        writeSimple(sensorType, sensorTsNs, values)
+                        // writeSimple(sensorType, sensorTsNs, values)  // Disabled - only logging LA
                     }
                     Sensor.TYPE_GRAVITY -> {
-                        writeSimple(sensorType, sensorTsNs, values)
+                        // writeSimple(sensorType, sensorTsNs, values)  // Disabled - only logging LA
                         // push orientation sample (GM) to engine when both are available
                         if (hasGravity && hasMagnetic) {
                             SensorManager.getRotationMatrix(rotMatrixGM, null, gravity, magnetic)
@@ -694,7 +710,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                         }
                     }
                     Sensor.TYPE_MAGNETIC_FIELD -> {
-                        writeSimple(sensorType, sensorTsNs, values)
+                        // writeSimple(sensorType, sensorTsNs, values)  // Disabled - only logging LA
                         if (hasGravity && hasMagnetic) {
                             SensorManager.getRotationMatrix(rotMatrixGM, null, gravity, magnetic)
                             val qGM = OrientationUtils.fromRotationMatrix(rotMatrixGM)
@@ -703,7 +719,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                         }
                     }
                     Sensor.TYPE_ROTATION_VECTOR -> {
-                        writeSimple(sensorType, sensorTsNs, values)
+                        // writeSimple(sensorType, sensorTsNs, values)  // Disabled - only logging LA
                         val qRV = OrientationUtils.fromRotVec(rotVec)
                         engineLA.onOri(OriSample(ts = latestRotTsNs, q = qRV))
                     }
@@ -715,7 +731,8 @@ class SensorLoggerService : Service(), SensorEventListener {
 
                 if (!isLogging || !writersOpen) return@synchronized
 
-                // ---- Combined snapshot CSV (unchanged) ----
+                // ---- Combined snapshot CSV (DISABLED) ----
+                /* // Disabled - only logging LA
                 runCatching {
                     val cw = getCombinedWriter() ?: return@runCatching
                     val line = buildString {
@@ -746,6 +763,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                 }.onFailure {
                     if (isLogging) android.util.Log.e("SensorLogger", "combined write failed", it)
                 }
+                */ // End disabled combined CSV block
             }
         }
     }
@@ -1119,9 +1137,244 @@ class SensorLoggerService : Service(), SensorEventListener {
     }
 
     // ==============================
+    // Post-processing: Constrained-time velocity correction
+    // ==============================
+    private fun postProcessVelocityCorrection(
+        laFileRef: File?,
+        distanceMeters: Double,
+        targetTimeSec: Double,
+        toleranceSec: Double
+    ) {
+        val laFile = laFileRef ?: return
+        if (!laFile.exists()) return
+
+        val WALK_THRESHOLD = 0.3  // m/s - threshold to detect motion start/end
+
+        // First pass: read data and detect walking phase
+        val header = laFile.bufferedReader().use { it.readLine() } ?: return
+        val cols = header.split(",")
+        val idxTime = cols.indexOf("laClockSec")
+        val idxV = cols.indexOf("V")
+        val idxVrv = cols.indexOf("V_rv")
+        val idxVpred = cols.indexOf("V_pred")
+        
+        if (idxTime < 0 || idxV < 0) {
+            android.util.Log.w("SensorLogger", "Required columns not found for velocity correction")
+            return
+        }
+
+        data class VelData(val t: Double, val v: Double, val vrv: Double?, val vpred: Double?)
+        val dataRows = mutableListOf<VelData>()
+
+        laFile.bufferedReader().use { br ->
+            br.readLine() // skip header
+            while (true) {
+                val line = br.readLine() ?: break
+                if (line.isEmpty() || line.startsWith("#")) continue
+                val parts = line.split(",")
+                if (idxTime >= parts.size) continue
+                
+                val t = parts[idxTime].toDoubleOrNull() ?: continue
+                val v = parts.getOrNull(idxV)?.toDoubleOrNull() ?: continue
+                val vrv = parts.getOrNull(idxVrv)?.toDoubleOrNull()
+                val vpred = parts.getOrNull(idxVpred)?.toDoubleOrNull()
+                
+                dataRows.add(VelData(t, v, vrv, vpred))
+            }
+        }
+
+        if (dataRows.size < 10) return
+
+        // Detect walking/swimming phase
+        // Start: first time |V| exceeds threshold
+        var walkStartIdx = 0
+        for (i in dataRows.indices) {
+            if (kotlin.math.abs(dataRows[i].v) > WALK_THRESHOLD) {
+                walkStartIdx = i
+                break
+            }
+        }
+
+        // End: last time V differs significantly from final V
+        val finalV = dataRows.last().v
+        var walkEndIdx = dataRows.size - 1
+        for (i in (dataRows.size - 1) downTo 0) {
+            if (kotlin.math.abs(dataRows[i].v - finalV) > WALK_THRESHOLD) {
+                walkEndIdx = i
+                break
+            }
+        }
+
+        // Ensure valid range
+        if (walkEndIdx <= walkStartIdx) {
+            android.util.Log.w("SensorLogger", "Could not detect valid walking phase")
+            return
+        }
+
+        val walkStartTime = dataRows[walkStartIdx].t
+        val walkEndTime = dataRows[walkEndIdx].t
+        val detectedDuration = walkEndTime - walkStartTime
+
+        android.util.Log.d("SensorLogger", 
+            "Detected walking phase: ${String.format(java.util.Locale.US, "%.2f", walkStartTime)}s to ${String.format(java.util.Locale.US, "%.2f", walkEndTime)}s (duration: ${String.format(java.util.Locale.US, "%.2f", detectedDuration)}s)")
+
+        // Check if detected duration is within tolerance of TARGET time
+        val timeDiff = kotlin.math.abs(detectedDuration - targetTimeSec)
+        
+        // Determine pace status
+        val paceStatus = when {
+            timeDiff <= toleranceSec -> "VALID"
+            detectedDuration < targetTimeSec -> "TOO_FAST"
+            else -> "TOO_SLOW"
+        }
+        
+        // Store for broadcast
+        lastPaceStatus = paceStatus
+        lastDetectedTime = detectedDuration
+        
+        // Broadcast the result
+        val resultIntent = android.content.Intent(ACTION_PACE_RESULT).apply {
+            putExtra(EXTRA_PACE_STATUS, paceStatus)
+            putExtra(EXTRA_TARGET_TIME, targetTimeSec)
+            putExtra(EXTRA_DETECTED_TIME, detectedDuration)
+            setPackage(packageName)
+        }
+        sendBroadcast(resultIntent)
+        
+        if (timeDiff > toleranceSec) {
+            android.util.Log.w("SensorLogger", 
+                "WARNING: Detected duration (${String.format(java.util.Locale.US, "%.1f", detectedDuration)}s) differs from target (${String.format(java.util.Locale.US, "%.1f", targetTimeSec)}s) by ${String.format(java.util.Locale.US, "%.1f", timeDiff)}s. Exceeds tolerance of +/-${String.format(java.util.Locale.US, "%.1f", toleranceSec)}s. Please repeat the lap at target pace.")
+            // Still apply correction but add warning to file
+        }
+
+        // Calculate velocities using TARGET time (declared pace), not detected time
+        val vAvgKnown = distanceMeters / targetTimeSec
+        
+        // Calculate raw velocity mean over the WALKING PHASE ONLY
+        val walkingData = dataRows.subList(walkStartIdx, walkEndIdx + 1)
+        val vMean = walkingData.map { it.v }.average()
+        val vrvMean = walkingData.mapNotNull { it.vrv }.let { if (it.isNotEmpty()) it.average() else null }
+        val vpredMean = walkingData.mapNotNull { it.vpred }.let { if (it.isNotEmpty()) it.average() else null }
+
+        android.util.Log.d("SensorLogger", 
+            "Velocity correction: V_avg_target=${String.format(java.util.Locale.US, "%.3f", vAvgKnown)} m/s, V_raw_mean=${String.format(java.util.Locale.US, "%.3f", vMean)} m/s, correction=${String.format(java.util.Locale.US, "%.3f", vAvgKnown - vMean)} m/s")
+
+        // Second pass: rewrite file with corrected velocities
+        val tmpFile = File(laFile.parentFile, laFile.nameWithoutExtension + "_vcorr.csv")
+        var rowIndex = 0
+        val paceValid = timeDiff <= toleranceSec
+
+        laFile.bufferedReader().use { br ->
+            tmpFile.bufferedWriter().use { bw ->
+                // Write header with new columns
+                val newHeader = header + ",V_corr,V_rv_corr,V_pred_corr,V_avg_known,walk_phase,pace_valid\n"
+                bw.write(newHeader)
+
+                br.readLine() // skip original header
+                while (true) {
+                    val line = br.readLine() ?: break
+                    if (line.isEmpty()) continue
+                    
+                    // Pass through comment/footer rows
+                    if (line.startsWith("#")) {
+                        bw.write(line)
+                        bw.write(",,,,,,\n")
+                        continue
+                    }
+
+                    bw.write(line)
+
+                    // Add corrected velocities
+                    if (rowIndex < dataRows.size) {
+                        val d = dataRows[rowIndex]
+                        val inWalkPhase = rowIndex in walkStartIdx..walkEndIdx
+                        
+                        // Only apply correction during walking phase
+                        val vCorr = if (inWalkPhase) vAvgKnown + (d.v - vMean) else d.v
+                        val vrvCorr = if (inWalkPhase && d.vrv != null && vrvMean != null) 
+                            vAvgKnown + (d.vrv - vrvMean) else d.vrv
+                        val vpredCorr = if (inWalkPhase && d.vpred != null && vpredMean != null) 
+                            vAvgKnown + (d.vpred - vpredMean) else d.vpred
+
+                        bw.write(",")
+                        bw.write(String.format(java.util.Locale.US, "%.3f", vCorr))
+                        bw.write(",")
+                        if (vrvCorr != null) bw.write(String.format(java.util.Locale.US, "%.3f", vrvCorr))
+                        bw.write(",")
+                        if (vpredCorr != null) bw.write(String.format(java.util.Locale.US, "%.3f", vpredCorr))
+                        bw.write(",")
+                        bw.write(String.format(java.util.Locale.US, "%.3f", vAvgKnown))
+                        bw.write(",")
+                        bw.write(if (inWalkPhase) "1" else "0")
+                        bw.write(",")
+                        bw.write(if (paceValid) "1" else "0")
+                        bw.write("\n")
+                        
+                        rowIndex++
+                    } else {
+                        bw.write(",,,,,,\n")
+                    }
+                }
+
+                // Add summary footer
+                val summaryColCount = cols.size + 6
+                
+                // Correction info
+                val corrCells = MutableList(summaryColCount) { "" }
+                corrCells[0] = "#V_correction"
+                corrCells[corrCells.size - 6] = String.format(java.util.Locale.US, "%.6f", vAvgKnown - vMean)
+                bw.write(corrCells.joinToString(",") + "\n")
+                
+                // Target time
+                val targetCells = MutableList(summaryColCount) { "" }
+                targetCells[0] = "#target_time_sec"
+                targetCells[1] = String.format(java.util.Locale.US, "%.3f", targetTimeSec)
+                bw.write(targetCells.joinToString(",") + "\n")
+                
+                // Detected time
+                val detectedCells = MutableList(summaryColCount) { "" }
+                detectedCells[0] = "#detected_time_sec"
+                detectedCells[1] = String.format(java.util.Locale.US, "%.3f", detectedDuration)
+                bw.write(detectedCells.joinToString(",") + "\n")
+                
+                // Pace valid flag
+                val validCells = MutableList(summaryColCount) { "" }
+                validCells[0] = "#pace_valid"
+                validCells[1] = if (paceValid) "YES" else "NO - REPEAT LAP"
+                bw.write(validCells.joinToString(",") + "\n")
+                
+                // V_avg_known
+                val avgCells = MutableList(summaryColCount) { "" }
+                avgCells[0] = "#V_avg_known"
+                avgCells[1] = String.format(java.util.Locale.US, "%.3f", vAvgKnown)
+                bw.write(avgCells.joinToString(",") + "\n")
+            }
+        }
+
+        // Replace original with corrected file
+        if (!laFile.delete()) {
+            android.util.Log.w("SensorLogger", "Failed to delete original LA CSV for velocity correction")
+        }
+        if (!tmpFile.renameTo(laFile)) {
+            android.util.Log.e("SensorLogger", "Failed to rename velocity-corrected LA CSV")
+        } else {
+            val statusMsg = if (paceValid) "Pace validated OK" else "WARNING: Pace outside tolerance - repeat lap"
+            android.util.Log.d("SensorLogger", "Velocity correction applied. $statusMsg")
+        }
+    }
+
+    // ==============================
     // Companion object
     // ==============================
     companion object {
         const val EXTRA_AZIMUTH_DEG = "extra_azimuth_deg"
+        const val EXTRA_DISTANCE_METERS = "extra_distance_meters"
+        const val EXTRA_TARGET_TIME_SEC = "extra_target_time_sec"
+        
+        // Broadcast action for pace feedback
+        const val ACTION_PACE_RESULT = "com.example.sensorlogger.PACE_RESULT"
+        const val EXTRA_PACE_STATUS = "pace_status"  // "VALID", "TOO_FAST", "TOO_SLOW"
+        const val EXTRA_TARGET_TIME = "target_time"
+        const val EXTRA_DETECTED_TIME = "detected_time"
     }
 }

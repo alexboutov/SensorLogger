@@ -6,23 +6,57 @@
     android:orientation="vertical"
     android:padding="24dp">
 
-    <!-- Azimuth input (degrees 0–360) -->
+    <!-- Azimuth input (degrees 0-360) -->
     <com.google.android.material.textfield.TextInputLayout
         android:id="@+id/azimuthInputLayout"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:hint="Azimuth (degrees, 0–360)"
-        android:layout_marginTop="12dp">
-
+        android:hint="Azimuth (degrees, 0-360)">
         <com.google.android.material.textfield.TextInputEditText
             android:id="@+id/azimuthEditText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:inputType="numberDecimal|numberSigned"
-            android:imeOptions="actionDone"
+            android:imeOptions="actionNext"
             android:maxLines="1"
             android:singleLine="true"
             android:hint="e.g., 306" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <!-- Distance input (meters) -->
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/distanceInputLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Distance (meters)"
+        android:layout_marginTop="12dp">
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/distanceEditText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="numberDecimal"
+            android:imeOptions="actionNext"
+            android:maxLines="1"
+            android:singleLine="true"
+            android:hint="e.g., 13.716 (15 yards)" />
+    </com.google.android.material.textfield.TextInputLayout>
+
+    <!-- Target Time input (seconds) -->
+    <com.google.android.material.textfield.TextInputLayout
+        android:id="@+id/targetTimeInputLayout"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="Target Time (seconds)"
+        android:layout_marginTop="12dp">
+        <com.google.android.material.textfield.TextInputEditText
+            android:id="@+id/targetTimeEditText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:inputType="numberDecimal"
+            android:imeOptions="actionDone"
+            android:maxLines="1"
+            android:singleLine="true"
+            android:hint="e.g., 10.0" />
     </com.google.android.material.textfield.TextInputLayout>
 
     <!-- Single START/STOP toggle button -->
@@ -31,6 +65,6 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="START"
-        android:layout_marginTop="16dp" />
+        android:layout_marginTop="24dp" />
 
 </LinearLayout>
