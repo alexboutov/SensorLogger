@@ -1232,14 +1232,7 @@ class SensorLoggerService : Service(), SensorEventListener {
         lastPaceStatus = paceStatus
         lastDetectedTime = detectedDuration
         
-        // Broadcast the result
-        val resultIntent = android.content.Intent(ACTION_PACE_RESULT).apply {
-            putExtra(EXTRA_PACE_STATUS, paceStatus)
-            putExtra(EXTRA_TARGET_TIME, targetTimeSec)
-            putExtra(EXTRA_DETECTED_TIME, detectedDuration)
-            setPackage(packageName)
-        }
-        sendBroadcast(resultIntent)
+        
         
         if (timeDiff > toleranceSec) {
             android.util.Log.w("SensorLogger", 
@@ -1255,6 +1248,25 @@ class SensorLoggerService : Service(), SensorEventListener {
         val vMean = walkingData.map { it.v }.average()
         val vrvMean = walkingData.mapNotNull { it.vrv }.let { if (it.isNotEmpty()) it.average() else null }
         val vpredMean = walkingData.mapNotNull { it.vpred }.let { if (it.isNotEmpty()) it.average() else null }
+
+        // Calculate integrated distance from corrected velocity (walking phase only)
+        var calculatedDistance = 0.0
+        for (i in (walkStartIdx + 1)..walkEndIdx) {
+            val dt = dataRows[i].t - dataRows[i-1].t
+            val vCorr1 = vAvgKnown + (dataRows[i-1].v - vMean)
+            val vCorr2 = vAvgKnown + (dataRows[i].v - vMean)
+            calculatedDistance += (vCorr1 + vCorr2) / 2.0 * dt
+        }
+
+        // Broadcast the result
+        val resultIntent = android.content.Intent(ACTION_PACE_RESULT).apply {
+            putExtra(EXTRA_PACE_STATUS, paceStatus)
+            putExtra(EXTRA_TARGET_TIME, targetTimeSec)
+            putExtra(EXTRA_DETECTED_TIME, detectedDuration)
+            putExtra(EXTRA_DISTANCE, calculatedDistance)
+            setPackage(packageName)
+        }
+        sendBroadcast(resultIntent)
 
         android.util.Log.d("SensorLogger", 
             "Velocity correction: V_avg_target=${String.format(java.util.Locale.US, "%.3f", vAvgKnown)} m/s, V_raw_mean=${String.format(java.util.Locale.US, "%.3f", vMean)} m/s, correction=${String.format(java.util.Locale.US, "%.3f", vAvgKnown - vMean)} m/s")
@@ -1376,5 +1388,6 @@ class SensorLoggerService : Service(), SensorEventListener {
         const val EXTRA_PACE_STATUS = "pace_status"  // "VALID", "TOO_FAST", "TOO_SLOW"
         const val EXTRA_TARGET_TIME = "target_time"
         const val EXTRA_DETECTED_TIME = "detected_time"
+        const val EXTRA_DISTANCE = "distance"  // Calculated distance (for valid pace only)
     }
 }

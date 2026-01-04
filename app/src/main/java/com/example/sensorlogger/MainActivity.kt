@@ -36,8 +36,9 @@ class MainActivity : AppCompatActivity() {
                 val status = intent.getStringExtra(SensorLoggerService.EXTRA_PACE_STATUS) ?: return
                 val targetTime = intent.getDoubleExtra(SensorLoggerService.EXTRA_TARGET_TIME, 0.0)
                 val detectedTime = intent.getDoubleExtra(SensorLoggerService.EXTRA_DETECTED_TIME, 0.0)
+                val distance = intent.getDoubleExtra(SensorLoggerService.EXTRA_DISTANCE, 0.0)
                 
-                showPaceFeedback(status, targetTime, detectedTime)
+                showPaceFeedback(status, targetTime, detectedTime, distance)
             }
         }
     }
@@ -195,42 +196,38 @@ class MainActivity : AppCompatActivity() {
         }
     }
     
-    private fun showPaceFeedback(status: String, targetTime: Double, detectedTime: Double) {
-        val title: String
-        val message: String
-        val icon: Int
+    private fun showPaceFeedback(status: String, targetTime: Double, detectedTime: Double, distance: Double) {
+        val dialogView = layoutInflater.inflate(android.R.layout.simple_list_item_1, null)
+        val textView = dialogView.findViewById<android.widget.TextView>(android.R.id.text1)
         
         when (status) {
             "VALID" -> {
-                title = "PACE ACHIEVED"
-                message = String.format(
-                    "Target: %.1f sec\nActual: %.1f sec\n\nData is valid!",
-                    targetTime, detectedTime
-                )
-                icon = android.R.drawable.ic_dialog_info
+                val distanceText = String.format(java.util.Locale.US, "%.1f", distance)
+                textView.text = "PACE ACHIEVED!\n\nDistance: ${distanceText}m\n\nTarget: ${String.format("%.1f", targetTime)} sec\nActual: ${String.format("%.1f", detectedTime)} sec"
+                textView.setTextColor(android.graphics.Color.parseColor("#228B22"))  // Forest green
+                textView.textSize = 22f
+                textView.setTypeface(null, android.graphics.Typeface.BOLD)
+                textView.gravity = android.view.Gravity.CENTER
+                textView.setPadding(40, 40, 40, 40)
             }
             "TOO_FAST" -> {
-                title = "TOO FAST"
-                message = String.format(
-                    "Target: %.1f sec\nActual: %.1f sec\n\nPlease repeat at slower pace.",
-                    targetTime, detectedTime
-                )
-                icon = android.R.drawable.ic_dialog_alert
+                textView.text = "TOO FAST - Please Repeat\n\nTarget: ${String.format("%.1f", targetTime)} sec\nActual: ${String.format("%.1f", detectedTime)} sec"
+                textView.setTextColor(android.graphics.Color.RED)
+                textView.textSize = 18f
+                textView.gravity = android.view.Gravity.CENTER
+                textView.setPadding(40, 40, 40, 40)
             }
             else -> { // TOO_SLOW
-                title = "TOO SLOW"
-                message = String.format(
-                    "Target: %.1f sec\nActual: %.1f sec\n\nPlease repeat at faster pace.",
-                    targetTime, detectedTime
-                )
-                icon = android.R.drawable.ic_dialog_alert
+                textView.text = "TOO SLOW - Please Repeat\n\nTarget: ${String.format("%.1f", targetTime)} sec\nActual: ${String.format("%.1f", detectedTime)} sec"
+                textView.setTextColor(android.graphics.Color.RED)
+                textView.textSize = 18f
+                textView.gravity = android.view.Gravity.CENTER
+                textView.setPadding(40, 40, 40, 40)
             }
         }
         
         AlertDialog.Builder(this)
-            .setTitle(title)
-            .setMessage(message)
-            .setIcon(icon)
+            .setView(dialogView)
             .setPositiveButton("OK", null)
             .show()
     }
