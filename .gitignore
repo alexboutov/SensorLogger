@@ -48,3 +48,9 @@ app/.gitignore
 /logs/adb_pull.bat
 /logs/*.csv
 sensor_logs/*.csv
+
+# Ignore Python scripts and PNG files
+*.py
+*.png
+py/
+png/
