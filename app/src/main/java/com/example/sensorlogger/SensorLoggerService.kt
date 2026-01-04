@@ -150,7 +150,13 @@ class SensorLoggerService : Service(), SensorEventListener {
     private val magnetic = FloatArray(3)
     private var hasGravity = false
     private var hasMagnetic = false
-
+    private var lastValidMagnetic: FloatArray? = null  // Last known good magnetometer reading
+    private var lastMagTsNs: Long = 0L                 // Timestamp of last mag reading
+    private val MAG_MIN_MAGNITUDE = 20.0f   // μT - below this = interference or sensor error
+    private val MAG_MAX_MAGNITUDE = 80.0f   // μT - above this = metal/electronics nearby
+    private val MAG_MAX_CHANGE_RATE = 300.0f // μT/sec - faster than this = sudden interference
+    private var magValidCount = 0L          // Count of valid mag readings
+    private var magInvalidCount = 0L        // Count of rejected mag readings
     private val rotMatrixGM = FloatArray(9)
     private val rotMatrixRV = FloatArray(9)
     private val orientationValsGM = FloatArray(3) // [azimuth(Z), pitch(X), roll(Y)]
@@ -301,6 +307,12 @@ class SensorLoggerService : Service(), SensorEventListener {
         dcBlockPrevInput = 0.0
         dcBlockPrevOutput = 0.0
         
+        // Reset magnetometer validity counters
+        lastValidMagnetic = null
+        lastMagTsNs = 0L
+        magValidCount = 0L
+        magInvalidCount = 0L
+        
         prevLaTsNs = 0L
         laClockSec = 0.0
 
@@ -407,7 +419,42 @@ class SensorLoggerService : Service(), SensorEventListener {
     private fun unregisterSensors() {
         sensorManager.unregisterListener(this)
     }
+    /**
+     * Check if magnetometer reading is valid.
+     * Returns true if the reading should be used, false if it should be rejected.
+     */
+    private fun isMagnetometerValid(values: FloatArray, timestampNs: Long): Boolean {
+        // Calculate magnitude: sqrt(x² + y² + z²)
+        val magnitude = kotlin.math.sqrt(
+            values[0] * values[0] +
+                    values[1] * values[1] +
+                    values[2] * values[2]
+        )
 
+        // Check 1: Magnitude within Earth's field range
+        if (magnitude < MAG_MIN_MAGNITUDE || magnitude > MAG_MAX_MAGNITUDE) {
+            return false
+        }
+
+        // Check 2: Rate of change not too fast (if we have a previous reading)
+        val lastMag = lastValidMagnetic
+        if (lastMag != null && lastMagTsNs > 0) {
+            val dtSec = (timestampNs - lastMagTsNs) * 1e-9
+            if (dtSec > 0.001) {  // Avoid division by very small numbers
+                val dx = values[0] - lastMag[0]
+                val dy = values[1] - lastMag[1]
+                val dz = values[2] - lastMag[2]
+                val changeMagnitude = kotlin.math.sqrt(dx*dx + dy*dy + dz*dz)
+                val changeRate = changeMagnitude / dtSec.toFloat()
+
+                if (changeRate > MAG_MAX_CHANGE_RATE) {
+                    return false
+                }
+            }
+        }
+
+        return true
+    }
     // ==============================
     // onSensorChanged processing
     // ==============================
@@ -427,10 +474,19 @@ class SensorLoggerService : Service(), SensorEventListener {
                 System.arraycopy(values, 0, latestGRAV.v, 0, 3)
             }
             Sensor.TYPE_MAGNETIC_FIELD -> {
-                System.arraycopy(values, 0, magnetic, 0, 3)
-                hasMagnetic = true
-                latestMAG.ts = sensorTsNs
-                System.arraycopy(values, 0, latestMAG.v, 0, 3)
+                // Apply validity gating before accepting magnetometer reading
+                if (isMagnetometerValid(values, sensorTsNs)) {
+                    System.arraycopy(values, 0, magnetic, 0, 3)
+                    hasMagnetic = true
+                    latestMAG.ts = sensorTsNs
+                    System.arraycopy(values, 0, latestMAG.v, 0, 3)
+                    lastValidMagnetic = values.copyOf()
+                    lastMagTsNs = sensorTsNs
+                    magValidCount++
+                } else {
+                    // Reject bad reading, keep using last valid magnetic
+                    magInvalidCount++
+                }
             }
             Sensor.TYPE_ROTATION_VECTOR -> {
                 latestRotTsNs = sensorTsNs
@@ -1511,6 +1567,22 @@ class SensorLoggerService : Service(), SensorEventListener {
                 avgCells[0] = "#V_avg_known"
                 avgCells[1] = String.format(java.util.Locale.US, "%.3f", vAvgKnown)
                 bw.write(avgCells.joinToString(",") + "\n")
+                // Magnetometer validity stats
+                val magValidCells = MutableList(summaryColCount) { "" }
+                magValidCells[0] = "#mag_valid_count"
+                magValidCells[1] = magValidCount.toString()
+                bw.write(magValidCells.joinToString(",") + "\n")
+
+                val magInvalidCells = MutableList(summaryColCount) { "" }
+                magInvalidCells[0] = "#mag_invalid_count"
+                magInvalidCells[1] = magInvalidCount.toString()
+                bw.write(magInvalidCells.joinToString(",") + "\n")
+
+                val magRejectCells = MutableList(summaryColCount) { "" }
+                magRejectCells[0] = "#mag_rejection_rate"
+                val rejectRate = if (magValidCount + magInvalidCount > 0) 100.0 * magInvalidCount / (magValidCount + magInvalidCount) else 0.0
+                magRejectCells[1] = String.format(java.util.Locale.US, "%.1f%%", rejectRate)
+                bw.write(magRejectCells.joinToString(",") + "\n")
             }
         }
 
