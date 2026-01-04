@@ -1258,12 +1258,33 @@ class SensorLoggerService : Service(), SensorEventListener {
             calculatedDistance += (vCorr1 + vCorr2) / 2.0 * dt
         }
 
+        // Prepare chart data (downsample if needed for UI performance)
+        val maxChartPoints = 500
+        val step = if (walkingData.size > maxChartPoints) walkingData.size / maxChartPoints else 1
+        val chartTimes = DoubleArray((walkingData.size + step - 1) / step)
+        val chartVelocities = DoubleArray(chartTimes.size)
+        val chartStartTime = walkingData.firstOrNull()?.t ?: 0.0
+        
+        for (i in chartTimes.indices) {
+            val srcIdx = (i * step).coerceAtMost(walkingData.size - 1)
+            chartTimes[i] = walkingData[srcIdx].t - chartStartTime  // Normalize to start at 0
+            chartVelocities[i] = vAvgKnown + (walkingData[srcIdx].v - vMean)
+        }
+        
+        // Calculate velocity std dev for ±σ bands
+        val vCorrValues = walkingData.map { vAvgKnown + (it.v - vMean) }
+        val vStdDev = kotlin.math.sqrt(vCorrValues.map { (it - vAvgKnown) * (it - vAvgKnown) }.average())
+        
         // Broadcast the result
         val resultIntent = android.content.Intent(ACTION_PACE_RESULT).apply {
             putExtra(EXTRA_PACE_STATUS, paceStatus)
             putExtra(EXTRA_TARGET_TIME, targetTimeSec)
             putExtra(EXTRA_DETECTED_TIME, detectedDuration)
             putExtra(EXTRA_DISTANCE, calculatedDistance)
+            putExtra(EXTRA_CHART_TIMES, chartTimes)
+            putExtra(EXTRA_CHART_VELOCITIES, chartVelocities)
+            putExtra(EXTRA_V_TARGET, vAvgKnown)
+            putExtra(EXTRA_V_STDDEV, vStdDev)
             setPackage(packageName)
         }
         sendBroadcast(resultIntent)
@@ -1389,5 +1410,9 @@ class SensorLoggerService : Service(), SensorEventListener {
         const val EXTRA_TARGET_TIME = "target_time"
         const val EXTRA_DETECTED_TIME = "detected_time"
         const val EXTRA_DISTANCE = "distance"  // Calculated distance (for valid pace only)
+        const val EXTRA_CHART_TIMES = "chart_times"  // Time array for chart
+        const val EXTRA_CHART_VELOCITIES = "chart_velocities"  // V_corr array for chart
+        const val EXTRA_V_TARGET = "v_target"  // Target average velocity
+        const val EXTRA_V_STDDEV = "v_stddev"  // Velocity standard deviation
     }
 }
