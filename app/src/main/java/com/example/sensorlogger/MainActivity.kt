@@ -212,7 +212,8 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateStartStopLabel() {
-        binding.startStopButton.text = if (isLogging) "STOP" else "START"
+        binding.startStopButton.text = if (isLogging) "END test swim" else "BEGIN test swim"
+        // binding.startStopButton.text = if (isLogging) "STOP" else "START"
     }
 
     private fun hideKeyboard() {
