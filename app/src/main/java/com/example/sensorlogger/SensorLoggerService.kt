@@ -1276,6 +1276,7 @@ class SensorLoggerService : Service(), SensorEventListener {
     }
 
     // ==============================
+    // ==============================
     // Post-processing: Constrained-time velocity correction
     // ==============================
     private fun postProcessVelocityCorrection(
@@ -1287,75 +1288,32 @@ class SensorLoggerService : Service(), SensorEventListener {
         val laFile = laFileRef ?: return
         if (!laFile.exists()) return
 
-        val WALK_THRESHOLD = 0.3  // m/s - threshold to detect motion start/end
-
-        // First pass: read data and detect walking phase
-        val header = laFile.bufferedReader().use { it.readLine() } ?: return
-        val cols = header.split(",")
-        val idxTime = cols.indexOf("laClockSec")
-        val idxV = cols.indexOf("V")
-        val idxVrv = cols.indexOf("V_rv")
-        val idxVpred = cols.indexOf("V_pred")
+        // ========================================================================
+        // Use SwimPhaseDetector for start/end detection
+        // ========================================================================
+        val detector = SwimPhaseDetector()
         
-        if (idxTime < 0 || idxV < 0) {
-            android.util.Log.w("SensorLogger", "Required columns not found for velocity correction")
+        val dataRows = detector.parseDataFile(laFile)
+        if (dataRows == null) {
+            android.util.Log.w("SensorLogger", "Failed to parse data file for velocity correction")
             return
         }
-
-        data class VelData(val t: Double, val v: Double, val vrv: Double?, val vpred: Double?)
-        val dataRows = mutableListOf<VelData>()
-
-        laFile.bufferedReader().use { br ->
-            br.readLine() // skip header
-            while (true) {
-                val line = br.readLine() ?: break
-                if (line.isEmpty() || line.startsWith("#")) continue
-                val parts = line.split(",")
-                if (idxTime >= parts.size) continue
-                
-                val t = parts[idxTime].toDoubleOrNull() ?: continue
-                val v = parts.getOrNull(idxV)?.toDoubleOrNull() ?: continue
-                val vrv = parts.getOrNull(idxVrv)?.toDoubleOrNull()
-                val vpred = parts.getOrNull(idxVpred)?.toDoubleOrNull()
-                
-                dataRows.add(VelData(t, v, vrv, vpred))
-            }
-        }
-
-        if (dataRows.size < 10) return
-
-        // Detect walking/swimming phase
-        // Start: first time |V| exceeds threshold
-        var walkStartIdx = 0
-        for (i in dataRows.indices) {
-            if (kotlin.math.abs(dataRows[i].v) > WALK_THRESHOLD) {
-                walkStartIdx = i
-                break
-            }
-        }
-
-        // End: last time V differs significantly from final V
-        val finalV = dataRows.last().v
-        var walkEndIdx = dataRows.size - 1
-        for (i in (dataRows.size - 1) downTo 0) {
-            if (kotlin.math.abs(dataRows[i].v - finalV) > WALK_THRESHOLD) {
-                walkEndIdx = i
-                break
-            }
-        }
-
-        // Ensure valid range
-        if (walkEndIdx <= walkStartIdx) {
-            android.util.Log.w("SensorLogger", "Could not detect valid walking phase")
+        
+        val phase = detector.detectPhase(dataRows)
+        if (phase == null) {
+            android.util.Log.w("SensorLogger", "Could not detect valid walking/swimming phase")
             return
         }
-
-        val walkStartTime = dataRows[walkStartIdx].t
-        val walkEndTime = dataRows[walkEndIdx].t
-        val detectedDuration = walkEndTime - walkStartTime
+        
+        val walkStartIdx = phase.startIdx
+        val walkEndIdx = phase.endIdx
+        val detectedDuration = phase.duration
 
         android.util.Log.d("SensorLogger", 
-            "Detected walking phase: ${String.format(java.util.Locale.US, "%.2f", walkStartTime)}s to ${String.format(java.util.Locale.US, "%.2f", walkEndTime)}s (duration: ${String.format(java.util.Locale.US, "%.2f", detectedDuration)}s)")
+            "Detected phase: ${String.format(java.util.Locale.US, "%.2f", phase.startTime)}s to " +
+            "${String.format(java.util.Locale.US, "%.2f", phase.endTime)}s " +
+            "(duration: ${String.format(java.util.Locale.US, "%.2f", detectedDuration)}s, " +
+            "start: ${phase.detectionMethod}, end: ${phase.endDetectionMethod})")
 
         // Check if detected duration is within tolerance of TARGET time
         val timeDiff = kotlin.math.abs(detectedDuration - targetTimeSec)
@@ -1371,12 +1329,11 @@ class SensorLoggerService : Service(), SensorEventListener {
         lastPaceStatus = paceStatus
         lastDetectedTime = detectedDuration
         
-        
-        
         if (timeDiff > toleranceSec) {
             android.util.Log.w("SensorLogger", 
-                "WARNING: Detected duration (${String.format(java.util.Locale.US, "%.1f", detectedDuration)}s) differs from target (${String.format(java.util.Locale.US, "%.1f", targetTimeSec)}s) by ${String.format(java.util.Locale.US, "%.1f", timeDiff)}s. Exceeds tolerance of +/-${String.format(java.util.Locale.US, "%.1f", toleranceSec)}s. Please repeat the lap at target pace.")
-            // Still apply correction but add warning to file
+                "WARNING: Detected duration (${String.format(java.util.Locale.US, "%.1f", detectedDuration)}s) " +
+                "differs from target (${String.format(java.util.Locale.US, "%.1f", targetTimeSec)}s) by " +
+                "${String.format(java.util.Locale.US, "%.1f", timeDiff)}s. Exceeds tolerance.")
         }
 
         // Calculate velocities using TARGET time (declared pace), not detected time
@@ -1407,30 +1364,27 @@ class SensorLoggerService : Service(), SensorEventListener {
         // First pass: compute unfiltered V_corr
         for (i in chartTimes.indices) {
             val srcIdx = (i * step).coerceAtMost(walkingData.size - 1)
-            chartTimes[i] = walkingData[srcIdx].t - chartStartTime  // Normalize to start at 0
+            chartTimes[i] = walkingData[srcIdx].t - chartStartTime
             chartVelocities[i] = vAvgKnown + (walkingData[srcIdx].v - vMean)
         }
-        
+
         // Apply zero-phase high-pass filter to remove drift from chart display
         if (chartVelocities.size >= 12) {
             val sampleRateChart = if (chartTimes.size > 1 && chartTimes.last() > 0) {
                 (chartTimes.size - 1) / chartTimes.last()
             } else 200.0
-            
-            // Center, filter, then restore offset
+
             val chartCentered = DoubleArray(chartVelocities.size) { chartVelocities[it] - vAvgKnown }
             val chartFiltered = zeroPhaseHighPass(chartCentered, 0.15, sampleRateChart)
             for (i in chartVelocities.indices) {
                 chartVelocities[i] = vAvgKnown + chartFiltered[i]
             }
         }
-        
-        // Calculate velocity std dev for ±σ bands
-        // val vCorrValues = walkingData.map { vAvgKnown + (it.v - vMean) }
+
         // Calculate velocity std dev for ±σ bands
         val vCorrValues = walkingData.map { vAvgKnown + (it.v - vMean) }
         val vStdDev = kotlin.math.sqrt(vCorrValues.map { (it - vAvgKnown) * (it - vAvgKnown) }.average())
-        
+
         // Broadcast the result
         val resultIntent = android.content.Intent(ACTION_PACE_RESULT).apply {
             putExtra(EXTRA_PACE_STATUS, paceStatus)
@@ -1446,7 +1400,9 @@ class SensorLoggerService : Service(), SensorEventListener {
         sendBroadcast(resultIntent)
 
         android.util.Log.d("SensorLogger", 
-            "Velocity correction: V_avg_target=${String.format(java.util.Locale.US, "%.3f", vAvgKnown)} m/s, V_raw_mean=${String.format(java.util.Locale.US, "%.3f", vMean)} m/s, correction=${String.format(java.util.Locale.US, "%.3f", vAvgKnown - vMean)} m/s")
+            "Velocity correction: V_avg_target=${String.format(java.util.Locale.US, "%.3f", vAvgKnown)} m/s, " +
+            "V_raw_mean=${String.format(java.util.Locale.US, "%.3f", vMean)} m/s, " +
+            "correction=${String.format(java.util.Locale.US, "%.3f", vAvgKnown - vMean)} m/s")
 
         // Compute zero-phase filtered V_corr for the walking phase
         val vCorrArray = DoubleArray(dataRows.size) { i ->
@@ -1475,7 +1431,12 @@ class SensorLoggerService : Service(), SensorEventListener {
             }
         }
         
-        // Second pass: rewrite file with corrected velocities
+        // ========================================================================
+        // Rewrite CSV with corrected velocities
+        // ========================================================================
+        val header = laFile.bufferedReader().use { it.readLine() } ?: return
+        val cols = header.split(",")
+        
         val tmpFile = File(laFile.parentFile, laFile.nameWithoutExtension + "_vcorr.csv")
         var rowIndex = 0
         val paceValid = timeDiff <= toleranceSec
@@ -1567,6 +1528,7 @@ class SensorLoggerService : Service(), SensorEventListener {
                 avgCells[0] = "#V_avg_known"
                 avgCells[1] = String.format(java.util.Locale.US, "%.3f", vAvgKnown)
                 bw.write(avgCells.joinToString(",") + "\n")
+                
                 // Magnetometer validity stats
                 val magValidCells = MutableList(summaryColCount) { "" }
                 magValidCells[0] = "#mag_valid_count"
@@ -1597,6 +1559,7 @@ class SensorLoggerService : Service(), SensorEventListener {
             android.util.Log.d("SensorLogger", "Velocity correction applied. $statusMsg")
         }
     }
+
 
     // ==============================
     // Companion object
